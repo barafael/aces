@@ -35,6 +35,16 @@ pub enum NetworkMode {
 #[derive(Resource, Default, Debug, Clone)]
 pub struct AutoRoom(pub Option<String>);
 
+/// Asset folder for [`AssetPlugin`]: absolute in dev builds (binaries run
+/// from any directory still find the repo assets), portable in release.
+fn asset_root() -> String {
+    #[cfg(debug_assertions)]
+    if let Some(dir) = option_env!("CARGO_MANIFEST_DIR") {
+        return format!("{dir}/assets");
+    }
+    "assets".to_string()
+}
+
 fn main() {
     App::new()
         .add_plugins(
@@ -57,6 +67,11 @@ fn main() {
                     // probe with the index page; parsing that as meta fails
                     // and rejects every asset (gray screen). Same as gnils.
                     meta_check: AssetMetaCheck::Never,
+                    // Dev builds embed the crate's asset dir (absolute), so
+                    // the binary runs from any working directory; release
+                    // installs keep the portable "assets" folder next to the
+                    // executable.
+                    file_path: asset_root(),
                     ..default()
                 }),
         )
