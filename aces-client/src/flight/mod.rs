@@ -38,6 +38,7 @@ impl Plugin for FlightPlugin {
                 (
                     input::gather_input.run_if(in_state(crate::Phase::InGame)),
                     interpolate_pose,
+                    animate_control_surfaces,
                     camera::update_camera
                         .after(input::gather_input)
                         .after(interpolate_pose),
@@ -121,6 +122,24 @@ pub struct StallState {
     pub buffet_phase: f32,
 }
 
+/// A visible, deflecting control surface on the local airframe.
+#[derive(Component, Clone, Copy)]
+pub enum ControlSurface {
+    /// Horizontal stabilizer trailing edge (pitch).
+    Elevator,
+    /// Wing trailing edge panels; `left` distinguishes the pair.
+    Aileron { left: bool },
+    /// Vertical fin trailing edge (yaw).
+    Rudder,
+}
+
+/// Max elevator deflection [rad].
+pub const ELEVATOR_DEFLECT: f32 = 25f32.to_radians();
+/// Max aileron deflection [rad].
+pub const AILERON_DEFLECT: f32 = 22f32.to_radians();
+/// Max rudder deflection [rad].
+pub const RUDDER_DEFLECT: f32 = 28f32.to_radians();
+
 // ── Spawning ────────────────────────────────────────────────────────────────
 
 /// Enter the game: spawn the local plane at this peer's spawn slot and one
@@ -185,7 +204,7 @@ fn spawn_local(
             Visibility::default(),
         ))
         .with_children(|parent| {
-            spawn_airframe(parent, meshes, fuselage, accent);
+            spawn_airframe(parent, meshes, materials, fuselage, accent, true);
         });
 }
 
@@ -229,17 +248,20 @@ fn spawn_remote(
             Visibility::default(),
         ))
         .with_children(|parent| {
-            spawn_airframe(parent, meshes, fuselage, accent);
+            spawn_airframe(parent, meshes, materials, fuselage, accent, false);
         });
 }
 
 /// The placeholder low-poly airframe shared by local and remote planes
-/// (replaced by glTF models in milestone 6).
+/// (replaced by glTF models in milestone 6). `with_surfaces` adds hinged
+/// control surfaces; only the local plane's are animated.
 fn spawn_airframe(
     parent: &mut bevy::ecs::hierarchy::ChildSpawnerCommands,
     meshes: &mut ResMut<Assets<Mesh>>,
+    materials: &mut ResMut<Assets<StandardMaterial>>,
     fuselage: Handle<StandardMaterial>,
     accent: Handle<StandardMaterial>,
+    with_surfaces: bool,
 ) {
     // Fuselage: capsule lying along -Z/+Z.
     parent.spawn((
@@ -265,6 +287,100 @@ fn spawn_airframe(
         MeshMaterial3d(accent.clone()),
         Transform::from_xyz(0.0, 1.4, 6.2),
     ));
+
+    if !with_surfaces {
+        return;
+    }
+
+    // Control surfaces: each is a hinge entity on the hinge line with the
+    // panel offset behind it, so rotating the hinge swings the panel.
+    let surface_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.38, 0.40, 0.43),
+        perceptual_roughness: 0.7,
+        ..default()
+    });
+
+    // Elevator: stabilizer trailing edge (stabilizer chord ends at z = 7.0).
+    parent
+        .spawn((
+            ControlSurface::Elevator,
+            Transform::from_xyz(0.0, 0.3, 6.8),
+            Visibility::default(),
+        ))
+        .with_children(|hinge| {
+            hinge.spawn((
+                Mesh3d(meshes.add(Cuboid::new(5.4, 0.12, 0.5))),
+                MeshMaterial3d(surface_material.clone()),
+                Transform::from_xyz(0.0, 0.0, 0.3),
+            ));
+        });
+
+    // Ailerons: outboard wing trailing edge (wing chord ends at z = 1.8).
+    for (x, left) in [(-6.3, true), (6.3, false)] {
+        parent
+            .spawn((
+                ControlSurface::Aileron { left },
+                Transform::from_xyz(x, 0.0, 1.55),
+                Visibility::default(),
+            ))
+            .with_children(|hinge| {
+                hinge.spawn((
+                    Mesh3d(meshes.add(Cuboid::new(2.4, 0.12, 0.55))),
+                    MeshMaterial3d(surface_material.clone()),
+                    Transform::from_xyz(0.0, 0.0, 0.32),
+                ));
+            });
+    }
+
+    // Rudder: fin trailing edge (fin chord ends at z = 7.2).
+    parent
+        .spawn((
+            ControlSurface::Rudder,
+            Transform::from_xyz(0.0, 1.5, 6.9),
+            Visibility::default(),
+        ))
+        .with_children(|hinge| {
+            hinge.spawn((
+                Mesh3d(meshes.add(Cuboid::new(0.12, 2.0, 0.8))),
+                MeshMaterial3d(surface_material.clone()),
+                Transform::from_xyz(0.0, 0.0, 0.45),
+            ));
+        });
+}
+
+/// Deflect the local plane's control surfaces with the smoothed rates the
+/// flight model is actually applying.
+///
+/// Sign conventions (nose is -Z): pitch up → elevator trailing edge up;
+/// roll right → right aileron up, left down; yaw right → rudder trailing
+/// edge right.
+fn animate_control_surfaces(
+    plane: Single<(Entity, &AngularRates), With<LocalPlane>>,
+    mut surfaces: Query<(&ControlSurface, &mut Transform, &ChildOf)>,
+) {
+    let (plane_entity, rates) = *plane;
+    let pitch = (rates.pitch / model::MAX_PITCH_RATE).clamp(-1.0, 1.0);
+    let roll = (rates.roll / model::MAX_ROLL_RATE).clamp(-1.0, 1.0);
+    let yaw = (rates.yaw / model::MAX_YAW_RATE).clamp(-1.0, 1.0);
+
+    for (surface, mut transform, child_of) in &mut surfaces {
+        if child_of.parent() != plane_entity {
+            continue;
+        }
+        let (axis, angle) = match surface {
+            ControlSurface::Elevator => (Vec3::X, -pitch * ELEVATOR_DEFLECT),
+            ControlSurface::Aileron { left } => (
+                Vec3::X,
+                if *left {
+                    roll * AILERON_DEFLECT
+                } else {
+                    -roll * AILERON_DEFLECT
+                },
+            ),
+            ControlSurface::Rudder => (Vec3::Y, yaw * RUDDER_DEFLECT),
+        };
+        transform.rotation = Quat::from_axis_angle(axis, angle);
+    }
 }
 
 /// Leave the game: planes are rebuilt from scratch on the next entry.

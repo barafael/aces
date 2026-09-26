@@ -25,7 +25,7 @@ use crate::flight::{Aircraft, AngleOfAttack, AngularRates, LocalPlane, SimPose, 
 /// Gravitational acceleration [m/s²].
 pub const GRAVITY: f32 = 9.81;
 /// Specific thrust at full throttle [m/s²].
-pub const MAX_THRUST_ACC: f32 = 14.0;
+pub const MAX_THRUST_ACC: f32 = 18.0;
 /// Lift accel = `LIFT_K · CL · v²`; with the curve below this trims
 /// ~150 m/s cruise at ~6° AoA and ~84 m/s stall speed.
 pub const LIFT_K: f32 = 0.0010;
@@ -42,25 +42,27 @@ pub const STALL_LIFT_FLOOR: f32 = 0.3;
 /// Parasitic drag accel = `DRAG_K0 · v²`.
 pub const DRAG_K0: f32 = 0.00016;
 /// Induced drag accel = `INDUCED_K · CL² · v²`.
-pub const INDUCED_K: f32 = 0.0006;
+pub const INDUCED_K: f32 = 0.00045;
 /// Sideslip damping (fin) [1/s].
 pub const SIDE_DAMP: f32 = 0.6;
 /// Velocity-toward-nose alignment assist [1/s] (the instructor).
-pub const ALIGN_RATE: f32 = 1.2;
+pub const ALIGN_RATE: f32 = 1.6;
 /// Alignment assist retained while stalled, so recovery is possible but the
 /// stall bites.
 pub const STALL_ALIGN_FACTOR: f32 = 0.15;
 
 /// Commanded angular rates at full deflection and reference speed [rad/s].
-pub const MAX_PITCH_RATE: f32 = 1.5;
-pub const MAX_YAW_RATE: f32 = 0.45;
-pub const MAX_ROLL_RATE: f32 = 2.8;
+pub const MAX_PITCH_RATE: f32 = 2.2;
+pub const MAX_YAW_RATE: f32 = 0.6;
+pub const MAX_ROLL_RATE: f32 = 4.2;
 /// Speed the rate limits are defined at; slower flight turns slower.
-pub const RATE_REF_SPEED: f32 = 120.0;
-/// Clamp range for the speed scaling of the rates.
-pub const RATE_SPEED_FACTOR: (f32, f32) = (0.3, 1.3);
+pub const RATE_REF_SPEED: f32 = 100.0;
+/// Clamp range for the speed scaling of the rates. The floor keeps plenty
+/// of authority at low speed — arcade-sims feel "sluggish" when hard
+/// manoeuvres bleed energy and the controls go dead.
+pub const RATE_SPEED_FACTOR: (f32, f32) = (0.45, 1.3);
 /// How fast smoothed rates approach their command [1/s].
-pub const RATE_SMOOTHING: f32 = 8.0;
+pub const RATE_SMOOTHING: f32 = 12.0;
 /// Throttle change rate [1/s].
 pub const THROTTLE_RATE: f32 = 0.4;
 /// Buffet (airframe shake) frequency while stalled [rad/s].
@@ -181,8 +183,11 @@ pub fn step(state: &mut FlightState, input: &PilotInput, dt: f32) {
         // plane's up vector.
         let lift_dir = (up - vel_dir * up.dot(vel_dir)).normalize_or_zero();
         acc += lift_dir * (LIFT_K * cl * speed * speed);
-        // Drag: parasitic + induced, opposing the velocity.
-        let drag = speed * speed * (DRAG_K0 + INDUCED_K * cl * cl);
+        // Drag: parasitic + induced, opposing the velocity. The induced part
+        // uses the pre-stall lift coefficient: past the stall the flow is
+        // separated — lift collapses, but drag stays high.
+        let cl_drag = cl.min(lift_coefficient(STALL_ALPHA));
+        let drag = speed * speed * (DRAG_K0 + INDUCED_K * cl_drag * cl_drag);
         acc -= vel_dir * drag;
         // Fin: damp lateral (sideslip) velocity.
         acc -= right * (v_local.x * SIDE_DAMP);
@@ -288,7 +293,7 @@ mod tests {
         let mut state = cruise_state();
         run(&mut state, PilotInput::default(), 30.0);
         assert!(
-            (80.0..260.0).contains(&state.vel.length()),
+            (80.0..290.0).contains(&state.vel.length()),
             "speed {} out of band",
             state.vel.length()
         );
@@ -372,24 +377,28 @@ mod tests {
         );
     }
 
-    /// Turning is rate-limited and near-circular at full deflection: after a
-    /// sustained level pull the heading should have swung most of the way
-    /// around without exploding the speed.
+    /// Full deflection turns fast: the nose sweeps at least 1.5 rad between
+    /// t = 0.5 s and t = 1.5 s of a sustained pull (≥ ~1.5 rad/s against the
+    /// 2.2 rad/s limit — the gap is rate smoothing and speed bleed). Net
+    /// heading is a poor metric: an agile loop returns to its start.
     #[test]
     fn sustained_pull_turns() {
         let mut state = cruise_state();
-        let forward_before = state.quat * Vec3::NEG_Z;
-        run(
-            &mut state,
-            PilotInput {
-                pitch: 1.0,
-                ..default()
-            },
-            2.5,
-        );
-        let forward_after = state.quat * Vec3::NEG_Z;
-        let angle = forward_before.angle_between(forward_after);
-        assert!(angle > 2.0, "only turned {angle} rad in 2.5 s of full pull");
+        let input = PilotInput {
+            pitch: 1.0,
+            ..default()
+        };
+        let mut before = None;
+        for i in 0..(1.5 / DT) as usize {
+            run(&mut state, input, DT);
+            let t = i as f32 * DT;
+            if (t - 0.5).abs() < DT / 2.0 {
+                before = Some(state.quat * Vec3::NEG_Z);
+            }
+        }
+        let after = state.quat * Vec3::NEG_Z;
+        let angle = before.unwrap().angle_between(after);
+        assert!(angle > 1.5, "only {angle:.2} rad of nose sweep in 1 s of full pull");
         assert!(state.vel.length().is_finite() && state.vel.length() > 30.0);
     }
 
@@ -411,6 +420,7 @@ mod tests {
             state.quat.length()
         );
     }
+
 
     /// The lift curve is linear below the stall and collapses past it.
     #[test]

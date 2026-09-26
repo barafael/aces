@@ -46,12 +46,12 @@ pub struct FlightInput {
 const AIM_DEADZONE: f32 = 0.5f32.to_radians();
 /// Lateral error that commands full bank. Banking is what converts a
 /// horizontal error into a pull, so it leads the turn.
-const BANK_BAND: f32 = 45f32.to_radians();
+const BANK_BAND: f32 = 40f32.to_radians();
 /// Vertical error that commands full pull/push.
-const PITCH_BAND: f32 = 30f32.to_radians();
+const PITCH_BAND: f32 = 25f32.to_radians();
 /// Vertical error that commands full rudder-yaw (fine tracking only; the
 /// pitch axis is far stronger, which is why the instructor banks).
-const YAW_BAND: f32 = 20f32.to_radians();
+const YAW_BAND: f32 = 16f32.to_radians();
 /// Weight of the direct rudder-yaw relative to a full band.
 const YAW_AUTHORITY: f32 = 0.5;
 /// Wing-leveling strength (gain on the sine of the bank angle).
