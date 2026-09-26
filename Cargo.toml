@@ -1,6 +1,10 @@
-[package]
-name = "aces"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+members = ["aces-client", "aces-protocol", "aces-net"]
+resolver = "3"
 
-[dependencies]
+default-members = ["aces-client"]
+
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+lto = "thin"
