@@ -8,3 +8,9 @@ default-members = ["aces-client"]
 inherits = "release"
 opt-level = "z"
 lto = "thin"
+
+# Debug builds compile dependencies (bevy) with light optimization: the
+# unoptimized debug wasm was ~1.4 GB and OOM-killed wasm-bindgen, and opt-1
+# dependencies are dramatically faster to *run* in native dev too.
+[profile.dev.package."*"]
+opt-level = 1

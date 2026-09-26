@@ -3,7 +3,7 @@
 //! The simulation state is kept in [`FlightState`] and advanced by the pure
 //! function [`step`], so the whole flight model is unit-testable without a
 //! Bevy `App`. [`step_flight`] shims the ECS components in and out on the
-//! fixed 60 Hz tick.
+//! fixed 60 Hz tick, writing [`SimPose`]; rendering interpolates from there.
 //!
 //! Model: accelerations in world space, no explicit mass (specific forces).
 //! - Thrust along the nose from the throttle.
@@ -18,7 +18,7 @@
 use bevy::prelude::*;
 
 use crate::flight::input::FlightInput;
-use crate::flight::{Aircraft, AngleOfAttack, AngularRates, StallState, Velocity};
+use crate::flight::{Aircraft, AngleOfAttack, AngularRates, SimPose, StallState, Velocity};
 
 // ── Constants (tuned for a ~16 m wingspan jet) ──────────────────────────────
 
@@ -157,6 +157,8 @@ pub fn step(state: &mut FlightState, input: &PilotInput, dt: f32) {
         * Quat::from_axis_angle(Vec3::X, (state.rates.pitch + buffet) * dt)
         * Quat::from_axis_angle(Vec3::Y, -state.rates.yaw * dt)
         * Quat::from_axis_angle(Vec3::NEG_Z, state.rates.roll * dt);
+    // Keep rounding error from accumulating into a non-unit quaternion.
+    state.quat = state.quat.normalize();
 
     let forward = state.quat * Vec3::NEG_Z;
     let up = state.quat * Vec3::Y;
@@ -187,7 +189,13 @@ pub fn step(state: &mut FlightState, input: &PilotInput, dt: f32) {
 
         // Instructor: rotate the velocity toward the nose so the plane goes
         // where it points; nearly off while stalled.
-        let align = ALIGN_RATE * if state.stalled { STALL_ALIGN_FACTOR } else { 1.0 } * dt;
+        let align = ALIGN_RATE
+            * if state.stalled {
+                STALL_ALIGN_FACTOR
+            } else {
+                1.0
+            }
+            * dt;
         let aligned_dir = (vel_dir + (forward - vel_dir) * align).normalize_or_zero();
         state.vel = aligned_dir * speed;
     }
@@ -206,7 +214,7 @@ pub fn step(state: &mut FlightState, input: &PilotInput, dt: f32) {
 
 /// Everything the flight model touches on the aircraft entity.
 type PlaneParts = (
-    &'static mut Transform,
+    &'static mut SimPose,
     &'static mut Velocity,
     &'static mut Aircraft,
     &'static mut AngularRates,
@@ -219,10 +227,11 @@ pub fn step_flight(
     input: Res<FlightInput>,
     mut plane: Single<PlaneParts, With<Aircraft>>,
 ) {
-    let (transform, velocity, aircraft, rates, alpha, stall) = &mut *plane;
+    let (pose, velocity, aircraft, rates, alpha, stall) = &mut *plane;
+    let (pos, quat) = pose.current;
     let mut state = FlightState {
-        pos: transform.translation,
-        quat: transform.rotation,
+        pos,
+        quat,
         vel: velocity.0,
         rates: **rates,
         throttle: aircraft.throttle,
@@ -242,8 +251,8 @@ pub fn step_flight(
         time.delta_secs(),
     );
 
-    transform.translation = state.pos;
-    transform.rotation = state.quat;
+    pose.previous = pose.current;
+    pose.current = (state.pos, state.quat);
     velocity.0 = state.vel;
     aircraft.throttle = state.throttle;
     alpha.0 = state.alpha;
@@ -295,16 +304,43 @@ mod tests {
     #[test]
     fn full_pull_stalls() {
         let mut state = cruise_state();
-        run(&mut state, PilotInput { pitch: 1.0, throttle_delta: 1.0, ..default() }, 6.0);
-        assert!(state.stalled, "never stalled the aircraft; alpha={}", state.alpha);
+        run(
+            &mut state,
+            PilotInput {
+                pitch: 1.0,
+                throttle_delta: 1.0,
+                ..default()
+            },
+            6.0,
+        );
+        assert!(
+            state.stalled,
+            "never stalled the aircraft; alpha={}",
+            state.alpha
+        );
     }
 
     /// …and releasing the stick must let it recover.
     #[test]
     fn stall_recovers() {
         let mut state = cruise_state();
-        run(&mut state, PilotInput { pitch: 1.0, throttle_delta: 1.0, ..default() }, 6.0);
-        run(&mut state, PilotInput { throttle_delta: 1.0, ..default() }, 10.0);
+        run(
+            &mut state,
+            PilotInput {
+                pitch: 1.0,
+                throttle_delta: 1.0,
+                ..default()
+            },
+            6.0,
+        );
+        run(
+            &mut state,
+            PilotInput {
+                throttle_delta: 1.0,
+                ..default()
+            },
+            10.0,
+        );
         assert!(!state.stalled, "did not recover; alpha={}", state.alpha);
         assert!(
             (80.0..320.0).contains(&state.vel.length()),
@@ -320,7 +356,14 @@ mod tests {
     fn d_rolls_right() {
         let mut state = cruise_state();
         let right_before = state.quat * Vec3::X;
-        run(&mut state, PilotInput { roll: 1.0, ..default() }, 0.25);
+        run(
+            &mut state,
+            PilotInput {
+                roll: 1.0,
+                ..default()
+            },
+            0.25,
+        );
         let up_after = state.quat * Vec3::Y;
         let lean = up_after.dot(right_before);
         assert!(
@@ -336,14 +379,37 @@ mod tests {
     fn sustained_pull_turns() {
         let mut state = cruise_state();
         let forward_before = state.quat * Vec3::NEG_Z;
-        run(&mut state, PilotInput { pitch: 1.0, ..default() }, 2.5);
+        run(
+            &mut state,
+            PilotInput {
+                pitch: 1.0,
+                ..default()
+            },
+            2.5,
+        );
         let forward_after = state.quat * Vec3::NEG_Z;
         let angle = forward_before.angle_between(forward_after);
-        assert!(
-            angle > 2.0,
-            "only turned {angle} rad in 2.5 s of full pull"
-        );
+        assert!(angle > 2.0, "only turned {angle} rad in 2.5 s of full pull");
         assert!(state.vel.length().is_finite() && state.vel.length() > 30.0);
+    }
+
+    /// Long sessions of constant manoeuvring must not let the attitude
+    /// quaternion drift away from unit length.
+    #[test]
+    fn attitude_stays_normalized() {
+        let mut state = cruise_state();
+        let input = PilotInput {
+            pitch: 0.3,
+            yaw: 0.7,
+            roll: 0.9,
+            throttle_delta: 1.0,
+        };
+        run(&mut state, input, 600.0);
+        assert!(
+            (state.quat.length() - 1.0).abs() < 1e-5,
+            "quat length drifted to {}",
+            state.quat.length()
+        );
     }
 
     /// The lift curve is linear below the stall and collapses past it.
@@ -356,7 +422,10 @@ mod tests {
         assert!((cl_stall - cl_low) > 0.8, "lift curve too flat");
         // The stall must actually remove lift (at 24°, 0.8 through the
         // stall zone, the linear value 2.04 has dropped to ~0.64·cl_stall).
-        assert!(cl_deep < cl_stall * 0.7, "no lift collapse at 24°: {cl_deep}");
+        assert!(
+            cl_deep < cl_stall * 0.7,
+            "no lift collapse at 24°: {cl_deep}"
+        );
         // And flatten out at the floor.
         let cl_deeper = lift_coefficient(STALL_END_ALPHA);
         assert!((cl_deeper - cl_deep).abs() < 0.25);

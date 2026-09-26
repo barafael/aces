@@ -26,7 +26,10 @@ impl Plugin for FlightPlugin {
                 Update,
                 (
                     input::gather_input,
-                    camera::update_camera.after(input::gather_input),
+                    interpolate_pose,
+                    camera::update_camera
+                        .after(input::gather_input)
+                        .after(interpolate_pose),
                 ),
             )
             .add_systems(FixedUpdate, model::step_flight);
@@ -38,6 +41,34 @@ impl Plugin for FlightPlugin {
 pub struct Aircraft {
     /// 0 = idle, 1 = full throttle.
     pub throttle: f32,
+}
+
+/// The simulated pose, advanced on the fixed tick. The rendered
+/// [`Transform`] is interpolated between `previous` and `current` every
+/// frame, so motion stays smooth at any refresh rate.
+#[derive(Component, Clone, Copy)]
+pub struct SimPose {
+    pub previous: (Vec3, Quat),
+    pub current: (Vec3, Quat),
+}
+
+impl SimPose {
+    pub fn new(translation: Vec3, rotation: Quat) -> Self {
+        Self {
+            previous: (translation, rotation),
+            current: (translation, rotation),
+        }
+    }
+}
+
+/// Place the rendered aircraft between its last two simulated poses by the
+/// fraction of a fixed tick that has elapsed since the latest one.
+fn interpolate_pose(fixed: Res<Time<Fixed>>, mut planes: Query<(&SimPose, &mut Transform)>) {
+    let t = fixed.overstep_fraction();
+    for (pose, mut transform) in &mut planes {
+        transform.translation = pose.previous.0.lerp(pose.current.0, t);
+        transform.rotation = pose.previous.1.slerp(pose.current.1, t);
+    }
 }
 
 /// World-space velocity of the aircraft [m/s].
@@ -90,13 +121,12 @@ fn spawn_aircraft(
 
     commands
         .spawn((
-            Aircraft {
-                throttle: 0.7,
-            },
+            Aircraft { throttle: 0.7 },
             Velocity(Vec3::new(0.0, 0.0, -150.0)),
             AngularRates::default(),
             AngleOfAttack::default(),
             StallState::default(),
+            SimPose::new(Vec3::new(0.0, 500.0, 0.0), Quat::IDENTITY),
             Transform::from_xyz(0.0, 500.0, 0.0),
             Visibility::default(),
         ))

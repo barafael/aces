@@ -45,11 +45,15 @@ host-sequenced events) but change the authority model:
 - State: velocity vector; AoA computed from velocity vs nose. Lift ∝ AoA (with
   stall past critical AoA → lift collapse), induced + parasitic drag, thrust
   from throttle, gravity.
-- Controls: **mouse = virtual stick** (pitch/yaw with smoothing, instructor
-  style — commanded turn rate, not raw torque), **A/D roll**, **Q/E rudder**,
+- Controls: **mouse = aim cursor, War Thunder arcade style** — the cursor is
+  an aim point; an instructor controller banks into off-axis targets and
+  pulls, flying the nose onto the cursor (flyable with mouse alone). A HUD
+  cursor ring shows the aim point, an orange nose marker shows where the
+  plane actually points. **A/D roll** and **Q/E rudder** add manual inputs,
   stall possible but forgiving. Hard G limits to keep it playable.
-- World: flat ocean plane, procedural gradient sky sphere + linear distance
-  fog, soft world bounds, scattered spawn points. (Terrain = stretch goal.)
+- World: flat ocean plane with a 1 km grid (mipmapped), gradient sky sphere +
+  linear distance fog, soft world bounds, scattered spawn points. (Terrain =
+  stretch goal.)
 
 ## Weapons & countermeasures (cone-based, arcade)
 
@@ -83,7 +87,7 @@ compression OFF**: bevy 0.19 supports neither Draco, nor meshopt, nor
 
 | Key | Action |
 | --- | --- |
-| `Mouse` | Pitch/yaw (virtual stick) |
+| `Mouse` | Aim cursor — instructor flies the nose onto it |
 | `A` / `D` | Roll |
 | `Q` / `E` | Rudder |
 | `W` / `S` | Throttle |
@@ -122,7 +126,11 @@ camera) · `weapons` (gun, missiles, lock, countermeasures, damage) · `net`
 
 ## Decisions log
 
-- Mouse = virtual stick; V = free look; F/C = separate flare/chaff keys.
+- Mouse = aim cursor with WT-arcade instructor; V = free look; F/C = separate
+  flare/chaff keys.
+- Dev profile builds deps at `opt-level = 1`: unoptimized debug wasm was
+  ~1.4 GB and OOM-killed wasm-bindgen; browser dev uses `trunk serve`
+  (debug) or `trunk build --release` (42 MB wasm) when memory is tight.
 - Native + browser (wasm via trunk, share links with `?room=`).
 - Semi-realistic flight model; cone-based arcade radar/IR.
 - 3-crate workspace like gnils; bevy 0.19 to match gnils.

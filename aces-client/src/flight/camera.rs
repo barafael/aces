@@ -7,8 +7,8 @@
 
 use bevy::prelude::*;
 
-use crate::flight::input::FreeLook;
 use crate::flight::Aircraft;
+use crate::flight::input::FreeLook;
 
 /// Camera position relative to the plane (forward is -Z, so +Z is behind).
 pub const CAM_OFFSET: Vec3 = Vec3::new(0.0, 4.0, 24.0);
