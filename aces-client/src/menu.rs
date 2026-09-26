@@ -65,12 +65,20 @@ struct LobbyText;
 #[derive(Component)]
 struct GameHint;
 
-fn spawn_ui(mut commands: Commands) {
+/// The embedded UI font (GNU FreeSans Bold, via gnils). Bevy's built-in
+/// default font is a small Fira Mono subset that lacks — – … etc.
+#[derive(Resource, Clone)]
+struct UiFont(Handle<Font>);
+
+fn spawn_ui(mut commands: Commands, assets: Res<AssetServer>) {
+    let font = UiFont(assets.load("fonts/FreeSansBold.ttf"));
     let text_font = TextFont {
+        font: font.0.clone().into(),
         font_size: FontSize::Px(26.0),
         ..default()
     };
     let text_color = TextColor(Color::srgb(0.9, 0.93, 1.0));
+    commands.insert_resource(font);
 
     commands
         .spawn(Node {
