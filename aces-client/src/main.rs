@@ -1,8 +1,10 @@
 //! aces — flight combat simulator client.
 //!
-//! Milestone 1 scaffold: a window with an ocean, a procedural sky and a
-//! static camera (see PLAN.md). Flight, weapons and networking arrive in
-//! later milestones as their own modules.
+//! Milestone 2: solo flight. Ocean, sky, one flyable aircraft with a
+//! semi-realistic flight model, mouse virtual stick, chase cam with free
+//! look (see PLAN.md). Weapons and networking arrive in later milestones.
+
+mod flight;
 
 use bevy::asset::{AssetMetaCheck, RenderAssetUsages};
 use bevy::image::Image;
@@ -53,6 +55,7 @@ fn main() {
             ..default()
         })
         .add_systems(Startup, setup_world)
+        .add_plugins(flight::FlightPlugin)
         .run();
 }
 
