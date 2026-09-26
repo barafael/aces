@@ -1,17 +1,39 @@
 //! aces — flight combat simulator client.
 //!
-//! Solo flight with War Thunder arcade-style mouse aim (see PLAN.md):
-//! the instructor flies the nose onto the cursor, a HUD shows both markers,
-//! and the ocean grid gives spatial reference. Weapons and networking arrive
-//! in later milestones.
+//! Phases: Menu (solo / host / join) → Lobby (roster, aircraft select) →
+//! InGame (flight + combat). See PLAN.md for the architecture.
 
 mod flight;
 mod hud;
+mod menu;
+mod net;
 mod world;
 
 use bevy::asset::AssetMetaCheck;
 use bevy::prelude::*;
 use bevy::window::WindowResolution;
+
+/// High-level app phases.
+#[derive(States, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Phase {
+    #[default]
+    Menu,
+    Lobby,
+    InGame,
+}
+
+/// Whether this session flies solo or over the network.
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkMode {
+    #[default]
+    Solo,
+    Net,
+}
+
+/// The room this instance was launched for (CLI arg / `?room=` parameter),
+/// enabling the hands-free auto host/join/start flow.
+#[derive(Resource, Default, Debug, Clone)]
+pub struct AutoRoom(pub Option<String>);
 
 fn main() {
     App::new()
@@ -45,7 +67,17 @@ fn main() {
             brightness: 400.0,
             ..default()
         })
+        // App state and session mode.
+        .init_state::<Phase>()
+        .init_resource::<NetworkMode>()
+        .insert_resource(AutoRoom(aces_net::arg_room()))
+        .insert_resource(aces_net::NetState::with_name(aces_net::petname()))
         .add_systems(Startup, world::setup_world)
-        .add_plugins((flight::FlightPlugin, hud::HudPlugin))
+        .add_plugins((
+            flight::FlightPlugin,
+            net::ClientNetPlugin,
+            menu::MenuPlugin,
+            hud::HudPlugin,
+        ))
         .run();
 }

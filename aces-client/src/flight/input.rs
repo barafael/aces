@@ -16,7 +16,7 @@ use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
-use crate::flight::Aircraft;
+use crate::flight::LocalPlane;
 
 /// Free-look orbit angles [rad], offsets applied on top of the plane's
 /// orientation. Decayed back to zero by the camera while inactive.
@@ -90,8 +90,8 @@ pub fn gather_input(
     keys: Res<ButtonInput<KeyCode>>,
     mut mouse_motion: MessageReader<MouseMotion>,
     window: Single<&Window, With<PrimaryWindow>>,
-    camera: Single<(&Camera, &GlobalTransform), (With<Camera3d>, Without<Aircraft>)>,
-    plane: Single<&Transform, With<Aircraft>>,
+    camera: Single<(&Camera, &GlobalTransform), (With<Camera3d>, Without<LocalPlane>)>,
+    plane: Single<&Transform, With<LocalPlane>>,
     mut free_look: ResMut<FreeLook>,
     mut input: ResMut<FlightInput>,
 ) {

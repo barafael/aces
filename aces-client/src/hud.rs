@@ -11,7 +11,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::window::{CursorOptions, PrimaryWindow};
 
-use crate::flight::Aircraft;
+use crate::flight::LocalPlane;
 
 /// Marker size in logical pixels.
 const MARKER_SIZE: f32 = 26.0;
@@ -120,8 +120,8 @@ fn hide_os_cursor(mut cursor: Single<&mut CursorOptions>, mut done: Local<bool>)
 #[allow(clippy::type_complexity)]
 fn update_markers(
     window: Single<&Window, With<PrimaryWindow>>,
-    camera: Single<(&Camera, &GlobalTransform), (With<Camera3d>, Without<Aircraft>)>,
-    plane: Single<&Transform, With<Aircraft>>,
+    camera: Single<(&Camera, &GlobalTransform), (With<Camera3d>, Without<LocalPlane>)>,
+    plane: Single<&Transform, With<LocalPlane>>,
     mut cursor_marker: Single<(&mut Node, &mut Visibility), (With<CursorMarker>, Without<NoseMarker>)>,
     mut nose_marker: Single<(&mut Node, &mut Visibility), (With<NoseMarker>, Without<CursorMarker>)>,
 ) {

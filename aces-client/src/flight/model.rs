@@ -18,7 +18,7 @@
 use bevy::prelude::*;
 
 use crate::flight::input::FlightInput;
-use crate::flight::{Aircraft, AngleOfAttack, AngularRates, SimPose, StallState, Velocity};
+use crate::flight::{Aircraft, AngleOfAttack, AngularRates, LocalPlane, SimPose, StallState, Velocity};
 
 // ── Constants (tuned for a ~16 m wingspan jet) ──────────────────────────────
 
@@ -225,7 +225,7 @@ type PlaneParts = (
 pub fn step_flight(
     time: Res<Time>,
     input: Res<FlightInput>,
-    mut plane: Single<PlaneParts, With<Aircraft>>,
+    mut plane: Single<PlaneParts, With<LocalPlane>>,
 ) {
     let (pose, velocity, aircraft, rates, alpha, stall) = &mut *plane;
     let (pos, quat) = pose.current;

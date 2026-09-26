@@ -4,6 +4,11 @@ resolver = "3"
 
 default-members = ["aces-client"]
 
+# getrandom is never referenced in code: it exists so rand's wasm32 backend
+# gets the `wasm_js` feature (see aces-net's wasm dependencies).
+[workspace.metadata.cargo-shear]
+ignored = ["getrandom"]
+
 [profile.wasm-release]
 inherits = "release"
 opt-level = "z"

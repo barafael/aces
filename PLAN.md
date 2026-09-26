@@ -128,9 +128,15 @@ camera) · `weapons` (gun, missiles, lock, countermeasures, damage) · `net`
 
 - Mouse = aim cursor with WT-arcade instructor; V = free look; F/C = separate
   flare/chaff keys.
+- Launching with a room id as the CLI arg / `?room=` parameter skips the
+  menu, joins that room, and the elected host auto-starts once the roster
+  has ≥ 2 players and every peer has greeted — hands-free two-instance
+  testing (normal launches keep the F/H/J menu flow).
 - Dev profile builds deps at `opt-level = 1`: unoptimized debug wasm was
   ~1.4 GB and OOM-killed wasm-bindgen; browser dev uses `trunk serve`
   (debug) or `trunk build --release` (42 MB wasm) when memory is tight.
+- Milestone 3 verified with two live instances: host election + demotion,
+  single `Start` with one seed, snapshot flow in both directions.
 - Native + browser (wasm via trunk, share links with `?room=`).
 - Semi-realistic flight model; cone-based arcade radar/IR.
 - 3-crate workspace like gnils; bevy 0.19 to match gnils.

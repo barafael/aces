@@ -7,7 +7,7 @@
 
 use bevy::prelude::*;
 
-use crate::flight::Aircraft;
+use crate::flight::LocalPlane;
 use crate::flight::input::FreeLook;
 
 /// Camera position relative to the plane (forward is -Z, so +Z is behind).
@@ -21,8 +21,8 @@ pub const FREE_LOOK_RETURN: f32 = 8.0;
 pub fn update_camera(
     time: Res<Time>,
     mut free_look: ResMut<FreeLook>,
-    plane: Single<&Transform, With<Aircraft>>,
-    mut camera: Single<&mut Transform, (With<Camera3d>, Without<Aircraft>)>,
+    plane: Single<&Transform, With<LocalPlane>>,
+    mut camera: Single<&mut Transform, (With<Camera3d>, Without<LocalPlane>)>,
     mut smoothed: Local<Option<Quat>>,
 ) {
     let dt = time.delta_secs();
