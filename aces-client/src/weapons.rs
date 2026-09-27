@@ -435,11 +435,14 @@ fn step_missiles(
             let dist = to_target.length();
 
             if dist < MISSILE_PROXIMITY {
+                let victim = missile.target.clone();
                 detonate(
                     &mut commands,
                     &assets,
                     &missile,
                     transform.translation,
+                    victim,
+                    me,
                     &mut out,
                 );
                 commands.entity(entity).despawn();
@@ -464,26 +467,24 @@ fn step_missiles(
         let heading = transform.rotation * Vec3::NEG_Z;
         transform.translation += heading * missile.speed * dt;
 
-        // Any-plane proximity (a missile crossing the merge may hit anyone).
-        let mut hit_anyone = false;
-        for (remote, t, health) in remotes.iter() {
-            if remote.peer == missile.owner || !health.alive() {
-                continue;
-            }
-            if t.translation.distance(transform.translation) < MISSILE_PROXIMITY * 0.8 {
-                detonate(
-                    &mut commands,
-                    &assets,
-                    &missile,
-                    transform.translation,
-                    &mut out,
-                );
-                commands.entity(entity).despawn();
-                hit_anyone = true;
-                break;
-            }
-        }
-        if hit_anyone {
+        // Any-plane proximity (a missile crossing the merge may hit anyone,
+        // and then that plane takes the damage).
+        let bystander = remotes.iter().find(|(remote, t, health)| {
+            remote.peer != missile.owner
+                && health.alive()
+                && t.translation.distance(transform.translation) < MISSILE_PROXIMITY * 0.8
+        });
+        if let Some((remote, ..)) = bystander {
+            detonate(
+                &mut commands,
+                &assets,
+                &missile,
+                transform.translation,
+                Some(remote.peer.clone()),
+                me,
+                &mut out,
+            );
+            commands.entity(entity).despawn();
             continue;
         }
 
@@ -494,22 +495,33 @@ fn step_missiles(
     }
 }
 
+/// A missile goes off at `pos`, hitting `victim` if any. Every peer shows
+/// the explosion; only the shooter's simulation claims the damage (the
+/// other simulations of the same missile only need to look alike).
+#[allow(clippy::too_many_arguments)]
 fn detonate(
     commands: &mut Commands,
     assets: &WeaponAssets,
     missile: &Missile,
     pos: Vec3,
+    victim: Option<String>,
+    me: &str,
     out: &mut NetOut,
 ) {
     spawn_explosion(commands, assets, pos, 8.0);
-    if let Some(victim) = &missile.target {
-        out.events.push(GameEvent::Damage {
-            shooter: missile.owner.clone(),
-            victim: victim.clone(),
-            amount: MISSILE_DAMAGE,
-            cause: DamageCause::Missile,
-        });
-    }
+    out.events.extend(missile_claim(missile, victim, me));
+}
+
+/// The damage claim for `missile` hitting `victim`, as seen by peer `me`:
+/// only the missile's owner claims.
+fn missile_claim(missile: &Missile, victim: Option<String>, me: &str) -> Option<GameEvent> {
+    (missile.owner == me).then_some(())?;
+    Some(GameEvent::Damage {
+        shooter: missile.owner.clone(),
+        victim: victim?,
+        amount: MISSILE_DAMAGE,
+        cause: DamageCause::Missile,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -613,20 +625,19 @@ fn apply_events(
                 speed,
                 target,
             } => {
-                // My own launches already spawned at fire time (fire_control).
-                if shooter != me {
-                    spawn_missile_entity(
-                        &mut commands,
-                        &assets,
-                        &shooter,
-                        kind,
-                        Vec3::from(pos),
-                        Quat::from_array(quat).normalize(),
-                        speed,
-                        target,
-                    );
-                    info!(%shooter, "missile in the air");
-                }
+                // Everyone spawns every missile — the shooter's own too,
+                // which `fire_control` only announced.
+                spawn_missile_entity(
+                    &mut commands,
+                    &assets,
+                    &shooter,
+                    kind,
+                    Vec3::from(pos),
+                    Quat::from_array(quat).normalize(),
+                    speed,
+                    target,
+                );
+                info!(%shooter, "missile in the air");
             }
             GameEvent::Damage {
                 shooter,
@@ -796,5 +807,43 @@ fn auto_dogfight(
     {
         loadout.missiles -= 1;
         out.events.push(launch_missile(state, me, target));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn missile(owner: &str) -> Missile {
+        Missile {
+            owner: owner.to_string(),
+            kind: 0,
+            target: Some("target".into()),
+            speed: 300.0,
+            age: 0.0,
+            motor: 0.0,
+        }
+    }
+
+    /// Every peer simulates every missile, but a hit is claimed exactly
+    /// once: by the shooter's simulation, against the plane it hit.
+    #[test]
+    fn only_the_shooter_claims_missile_damage() {
+        let m = missile("shooter");
+        assert!(missile_claim(&m, Some("target".into()), "bystander").is_none());
+        assert!(missile_claim(&m, Some("target".into()), "target").is_none());
+        match missile_claim(&m, Some("other".into()), "shooter") {
+            Some(GameEvent::Damage {
+                shooter, victim, ..
+            }) => {
+                assert_eq!(shooter, "shooter");
+                assert_eq!(victim, "other", "the plane actually hit takes the damage");
+            }
+            other => panic!("expected a damage claim, got {other:?}"),
+        }
+        assert!(
+            missile_claim(&m, None, "shooter").is_none(),
+            "a dud claims nothing"
+        );
     }
 }
