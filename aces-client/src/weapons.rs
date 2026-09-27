@@ -23,7 +23,9 @@ use std::env;
 use crate::flight::input::{FlightInput, MouseAim};
 use crate::flight::instructor::Instructor;
 use crate::flight::model::FlightState;
-use crate::flight::{Aircraft, LocalPlane, RemotePlane, SimPose, Velocity, spawn_state};
+use crate::flight::{
+    Aircraft, Life, LocalPlane, RemotePlane, SimPose, SpawnSet, Velocity, spawn_state,
+};
 use crate::net::{NetIn, NetOut};
 use crate::{NetworkMode, Phase};
 
@@ -174,14 +176,21 @@ impl Plugin for WeaponsPlugin {
                         update_ir_lock,
                         fire_control,
                         apply_events,
-                        respawn,
                         sync_remote_death,
                     )
                         .run_if(in_state(Phase::InGame)),
                     animate_explosions,
                 ),
             )
-            .add_systems(FixedUpdate, step_missiles.run_if(in_state(Phase::InGame)));
+            .add_systems(
+                FixedUpdate,
+                (
+                    step_missiles,
+                    // On the fixed tick, before the plane flies again.
+                    respawn.in_set(SpawnSet),
+                )
+                    .run_if(in_state(Phase::InGame)),
+            );
         // The test hook exists only when asked for at launch.
         if env::var("ACES_TEST_FIRE").is_ok() {
             app.add_systems(Update, auto_dogfight.run_if(in_state(Phase::InGame)));
@@ -697,6 +706,7 @@ fn respawn(
     mut plane: Single<
         (
             &Aircraft,
+            &mut Life,
             &mut FlightState,
             &mut Instructor,
             &mut SimPose,
@@ -708,6 +718,7 @@ fn respawn(
         With<LocalPlane>,
     >,
     mut lock: ResMut<IrLock>,
+    mut aim: ResMut<MouseAim>,
 ) {
     let Some(mut remaining) = loadout.respawn_in else {
         return;
@@ -719,9 +730,14 @@ fn respawn(
     }
 
     let index = net.my_index().unwrap_or(0) + loadout.respawns;
-    let (aircraft, state, instructor, pose, velocity, health, transform, visibility) = &mut *plane;
+    let (aircraft, life, state, instructor, pose, velocity, health, transform, visibility) =
+        &mut *plane;
+    // A fresh plane, exactly like the first spawn (see `spawn_local`): its
+    // own spawn state, controller and view along the new heading.
+    life.0 += 1;
     **state = spawn_state(index, &aircraft.airframe);
     **instructor = Instructor::default();
+    *aim = MouseAim::new(state.quat);
     **pose = SimPose::new(state.pos, state.quat);
     velocity.0 = state.vel;
     **health = Health::full();

@@ -36,7 +36,7 @@ use crate::Phase;
 use crate::flight::input::{FlightInput, FreeLook, MouseAim};
 use crate::flight::instructor::{Instructor, InstructorDebug};
 use crate::flight::model::{FlightState, LastCommand, step_flight};
-use crate::flight::{Aircraft, AngularRates, LocalPlane, Surfaces, camera};
+use crate::flight::{Aircraft, AngularRates, Life, LocalPlane, SpawnSet, Surfaces, camera};
 
 /// Bumped whenever a record changes shape.
 pub const FORMAT_VERSION: u32 = 3;
@@ -300,7 +300,7 @@ impl Plugin for RecorderPlugin {
         .add_systems(
             FixedUpdate,
             (
-                record_spawn.before(step_flight),
+                record_spawn.after(SpawnSet).before(step_flight),
                 record_tick.after(step_flight),
             )
                 .run_if(recording),
@@ -409,14 +409,16 @@ fn flush_on_exit(mut exits: MessageReader<AppExit>, mut recorder: ResMut<FlightR
     }
 }
 
-/// The local plane, on the tick it appeared.
-type NewLocalPlane = (With<LocalPlane>, Added<FlightState>);
-
+/// A fresh local plane — first spawn or respawn (a new [`Life`]) — starts a
+/// new replay segment with its spawn state.
 fn record_spawn(
     mut recorder: ResMut<FlightRecorder>,
-    spawned: Query<(&FlightState, &Aircraft), NewLocalPlane>,
+    planes: Query<(Ref<Life>, &FlightState, &Aircraft), With<LocalPlane>>,
 ) {
-    for (state, aircraft) in &spawned {
+    for (life, state, aircraft) in &planes {
+        if !life.is_changed() {
+            continue;
+        }
         let frame = recorder.frame;
         recorder.write(&Record::Spawn(Spawn {
             frame,

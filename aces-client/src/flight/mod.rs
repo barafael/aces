@@ -82,6 +82,7 @@ impl Plugin for FlightPlugin {
                         .after(interpolate_pose),
                 ),
             )
+            .configure_sets(FixedUpdate, SpawnSet.before(model::step_flight))
             .add_systems(FixedUpdate, model::step_flight);
     }
 }
@@ -89,6 +90,18 @@ impl Plugin for FlightPlugin {
 /// The plane this peer flies. Authoritative locally; broadcast via snapshots.
 #[derive(Component)]
 pub struct LocalPlane;
+
+/// Fixed-tick systems that (re)spawn the local plane. They run before the
+/// flight model steps, and the flight recorder notes the spawn after them,
+/// so a spawn always lands between two ticks — never mid-frame.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SpawnSet;
+
+/// Which life of the local plane this is, bumped on every respawn. A
+/// respawn resets the plane in place, so this is how observers (the flight
+/// recorder) tell a fresh plane from one that has been flying.
+#[derive(Component, Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Life(pub u32);
 
 /// Which aircraft type a plane is, with its flight characteristics. On
 /// every plane: the local one flies on the airframe, remote ones will pick
@@ -362,6 +375,7 @@ fn spawn_local(
     commands
         .spawn((
             LocalPlane,
+            Life::default(),
             aircraft,
             state,
             crate::weapons::Health::full(),
@@ -735,6 +749,7 @@ mod tests {
             .world_mut()
             .spawn((
                 LocalPlane,
+                Life::default(),
                 Aircraft::of_type(0),
                 state,
                 Instructor::default(),
@@ -823,7 +838,12 @@ mod tests {
                         .after(interpolate_pose),
                 ),
             )
-            .add_systems(FixedUpdate, model::step_flight);
+            .configure_sets(FixedUpdate, SpawnSet.before(model::step_flight))
+            .init_resource::<RespawnNow>()
+            .add_systems(
+                FixedUpdate,
+                (respawn_on_request.in_set(SpawnSet), model::step_flight),
+            );
 
         let quat = Quat::from_rotation_y(0.7);
         let state = FlightState::new(Vec3::new(10.0, 2500.0, -40.0), quat, 170.0, 0.9);
@@ -832,6 +852,7 @@ mod tests {
             .spawn((Camera3d::default(), Transform::default()));
         app.world_mut().spawn((
             LocalPlane,
+            Life::default(),
             Aircraft::of_type(0),
             state,
             Instructor::default(),
@@ -862,6 +883,7 @@ mod tests {
                 560 => key(&mut app, KeyCode::ShiftLeft, Released),
                 600 => key(&mut app, KeyCode::KeyM, Pressed),
                 601 => key(&mut app, KeyCode::KeyM, Released),
+                650 => app.world_mut().resource_mut::<RespawnNow>().0 = true,
                 _ => {}
             }
             app.update();
@@ -890,38 +912,77 @@ mod tests {
                 .unwrap()
                 .starts_with("segment,tick,t,rec_err_deg")
         );
-        assert_eq!(rows.count(), log.segments[0].ticks.len());
+        let ticks: usize = log.segments.iter().map(|s| s.ticks.len()).sum();
+        assert_eq!(rows.count(), ticks);
 
         assert!(log.header.is_some());
         assert_eq!(log.skipped, 0);
         assert_eq!(log.marks.len(), 1, "the M mark is missing");
-        let segment = &log.segments[0];
-        assert!(
-            segment.ticks.len() > 350,
-            "only {} ticks",
-            segment.ticks.len()
+        // The respawn started a second segment.
+        assert_eq!(
+            log.segments.len(),
+            2,
+            "the respawn must start a new segment"
         );
-        assert!(
-            segment.frames.len() >= 899,
-            "only {} frames",
-            segment.frames.len()
-        );
-        assert!(segment.frames.iter().any(|f| f.keys.contains('V')));
-        assert!(segment.ticks.iter().any(|t| t.input.roll == Some(1.0)));
-        assert!(segment.ticks.iter().any(|t| t.input.limiter_off));
+        let frames: usize = log.segments.iter().map(|s| s.frames.len()).sum();
+        assert!(ticks > 350, "only {ticks} ticks");
+        assert!(frames >= 899, "only {frames} frames");
+        let first = &log.segments[0];
+        assert!(first.frames.iter().any(|f| f.keys.contains('V')));
+        assert!(first.ticks.iter().any(|t| t.input.roll == Some(1.0)));
+        assert!(first.ticks.iter().any(|t| t.input.limiter_off));
 
-        for mouse in [false, true] {
-            let (airframe, _) = replay::airframe_for(segment, false);
-            let (samples, divergence) = replay::replay(segment, &airframe, mouse);
-            assert_eq!(samples.len(), segment.ticks.len());
-            assert!(
-                divergence.exact,
-                "replay (mouse: {mouse}) diverged: {divergence:?}"
-            );
+        for (i, segment) in log.segments.iter().enumerate() {
+            for mouse in [false, true] {
+                let (airframe, _) = replay::airframe_for(segment, false);
+                let (samples, divergence) = replay::replay(segment, &airframe, mouse);
+                assert_eq!(samples.len(), segment.ticks.len());
+                assert!(
+                    divergence.exact,
+                    "segment {i} replay (mouse: {mouse}) diverged: {divergence:?}"
+                );
+            }
         }
         let report = replay::report(&log, false, false, None).unwrap();
         println!("{report}");
-        assert!(report.contains("replay: exact"), "{report}");
+        assert_eq!(report.matches("replay: exact").count(), 2, "{report}");
         assert!(report.contains("mark at t ="), "{report}");
+    }
+
+    /// What [`respawn_on_request`] resets on the local plane.
+    type RespawnParts = (
+        &'static Aircraft,
+        &'static mut Life,
+        &'static mut FlightState,
+        &'static mut Instructor,
+        &'static mut SimPose,
+        &'static mut Velocity,
+        &'static mut Transform,
+    );
+
+    /// Test trigger for [`respawn_on_request`].
+    #[derive(Resource, Default)]
+    struct RespawnNow(bool);
+
+    /// Die and come back, the way `weapons::respawn` does it: on the fixed
+    /// tick in the spawn set, in place, with a new life, spawn state,
+    /// controller and aim.
+    fn respawn_on_request(
+        mut now: ResMut<RespawnNow>,
+        mut aim: ResMut<MouseAim>,
+        plane: Single<RespawnParts, With<LocalPlane>>,
+    ) {
+        if !std::mem::take(&mut now.0) {
+            return;
+        }
+        let (aircraft, mut life, mut state, mut instructor, mut pose, mut velocity, mut transform) =
+            plane.into_inner();
+        life.0 += 1;
+        *state = spawn_state(3, &aircraft.airframe);
+        *instructor = Instructor::default();
+        *pose = SimPose::new(state.pos, state.quat);
+        velocity.0 = state.vel;
+        *transform = Transform::from_translation(state.pos).with_rotation(state.quat);
+        *aim = MouseAim::new(state.quat);
     }
 }
