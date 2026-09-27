@@ -16,11 +16,9 @@
 //! The host is the roster authority; guests take its `Roster`/`Start`
 //! broadcasts verbatim.
 
-use bevy::prelude::*;
 use aces_protocol::{PlaneSnapshot, PlayerInfo};
-use matchbox_socket::{
-    MessageLoopFuture, RtcIceServerConfig, WebRtcSocket, WebRtcSocketBuilder,
-};
+use bevy::prelude::*;
+use matchbox_socket::{MessageLoopFuture, RtcIceServerConfig, WebRtcSocket, WebRtcSocketBuilder};
 use serde::{Deserialize, Serialize};
 use std::ops::{Deref, DerefMut};
 
@@ -196,7 +194,9 @@ impl NetState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RoomIdError {
     Empty,
-    TooLong { len: usize },
+    TooLong {
+        len: usize,
+    },
     /// The offending character, so the message can name it rather than
     /// saying "invalid".
     BadChar(char),
@@ -267,11 +267,10 @@ const ROOM_ADJECTIVES: &[&str] = &[
 /// Room nouns: the second half of a generated room name. Deliberately
 /// distinct from [`PET_NAMES`], so "room otter" and "player otter" never meet.
 const ROOM_NOUNS: &[&str] = &[
-    "anchor", "basin", "beacon", "birch", "blossom", "canyon", "cedar", "cliff", "cinder",
-    "coral", "dawn", "delta", "dune", "fjord", "fern", "forest", "harbor", "horizon", "island",
-    "ivy", "lagoon", "lantern", "moss", "meadow", "mesa", "mist", "orbit", "orchid", "pine",
-    "pond", "ripple", "reef", "river", "shore", "spring", "star", "summit", "tundra", "valley",
-    "zephyr",
+    "anchor", "basin", "beacon", "birch", "blossom", "canyon", "cedar", "cliff", "cinder", "coral",
+    "dawn", "delta", "dune", "fjord", "fern", "forest", "harbor", "horizon", "island", "ivy",
+    "lagoon", "lantern", "moss", "meadow", "mesa", "mist", "orbit", "orchid", "pine", "pond",
+    "ripple", "reef", "river", "shore", "spring", "star", "summit", "tundra", "valley", "zephyr",
 ];
 
 /// A freshly generated room id: a petname — "swift-harbor-42" — that survives
@@ -424,7 +423,8 @@ pub fn new_seed() -> u64 {
 /// The room id this instance belongs to. Native: first CLI arg (a fresh
 /// generated room otherwise). Wasm: the `?room=` URL parameter — a share
 /// link —, generated into the URL if absent.
-pub fn room_id() -> String {    #[cfg(target_arch = "wasm32")]
+pub fn room_id() -> String {
+    #[cfg(target_arch = "wasm32")]
     {
         use web_sys::wasm_bindgen::JsValue;
         let win = web_sys::window().expect("window always available");
@@ -507,11 +507,7 @@ pub fn invite_url(room: &str) -> Option<String> {
 // ── Broadcast helpers ───────────────────────────────────────────────────────
 
 /// Send a message to every peer on the reliable channel.
-pub fn broadcast_reliable(
-    socket: &mut MatchboxSocket,
-    peers: &[PeerId],
-    msg: &NetMsg,
-) -> bool {
+pub fn broadcast_reliable(socket: &mut MatchboxSocket, peers: &[PeerId], msg: &NetMsg) -> bool {
     if peers.is_empty() {
         return false;
     }
@@ -561,6 +557,7 @@ mod tests {
             pos: [1.0, 2.0, 3.0],
             rot: [0.0, 0.0, 0.0, 1.0],
             vel: [0.0, 0.0, -150.0],
+            surfaces: [12, -127, 64],
         });
         for msg in [
             NetMsg::Hello {
@@ -643,7 +640,10 @@ mod tests {
         assert_eq!(net.name, "ada", "the player's name is not per-room");
         assert_eq!(net.aircraft, 4, "the aircraft choice is not per-room");
         assert!(!net.is_host, "host status belongs to the old room");
-        assert!(net.players.is_empty(), "the roster was assigned by the old host");
+        assert!(
+            net.players.is_empty(),
+            "the roster was assigned by the old host"
+        );
         assert!(net.start.is_none(), "the start belongs to the old room");
         assert!(net.peers.is_empty());
         assert_eq!(net.my_id, None, "the id came from the old socket");

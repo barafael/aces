@@ -15,9 +15,8 @@ pub const TICK_HZ: f64 = 60.0;
 /// unreliable channel. Remote planes are interpolated between snapshots.
 pub const SNAPSHOT_HZ: f32 = 20.0;
 
-/// Number of selectable aircraft in the roster (models arrive in milestone
-/// 6; the stats table already keys on this).
-pub const AIRCRAFT_COUNT: u8 = 5;
+pub mod aircraft;
+pub use aircraft::{AIRCRAFT, AIRCRAFT_COUNT, AircraftType, Airframe, Engine, aircraft};
 
 // ── Lobby ───────────────────────────────────────────────────────────────────
 
@@ -27,7 +26,7 @@ pub struct PlayerInfo {
     /// Stable within a session; the peer id's string form.
     pub peer: String,
     pub name: String,
-    /// Index into the aircraft roster (stats table, milestone 6).
+    /// Index into [`AIRCRAFT`].
     pub aircraft: u8,
 }
 
@@ -45,6 +44,19 @@ pub struct PlaneSnapshot {
     pub rot: [f32; 4],
     /// World-space velocity [m/s], used for short-range extrapolation.
     pub vel: [f32; 3],
+    /// Control-surface positions (elevator, aileron, rudder), quantized
+    /// from [-1, 1] by [`quantize_surface`], so remote airframes animate.
+    pub surfaces: [i8; 3],
+}
+
+/// Pack a control-surface position in [-1, 1] into a byte.
+pub fn quantize_surface(value: f32) -> i8 {
+    (value.clamp(-1.0, 1.0) * 127.0).round() as i8
+}
+
+/// Unpack a byte from [`quantize_surface`].
+pub fn dequantize_surface(value: i8) -> f32 {
+    (value as f32 / 127.0).clamp(-1.0, 1.0)
 }
 
 // ── Spawn points ────────────────────────────────────────────────────────────
@@ -64,7 +76,11 @@ pub const SPAWN_ALTITUDE: f32 = 600.0;
 /// default forward (-Z) onto the flight direction.
 pub fn spawn_point(index: usize) -> ([f32; 3], f32) {
     let a = (index % SPAWN_COUNT) as f32 * core::f32::consts::TAU / SPAWN_COUNT as f32;
-    let pos = [a.cos() * SPAWN_RADIUS, SPAWN_ALTITUDE, a.sin() * SPAWN_RADIUS];
+    let pos = [
+        a.cos() * SPAWN_RADIUS,
+        SPAWN_ALTITUDE,
+        a.sin() * SPAWN_RADIUS,
+    ];
     // Tangent of the CCW circle at angle a is (-sin a, 0, cos a); solving
     // Ry(yaw) · -Z = tangent gives yaw = π - a.
     (pos, core::f32::consts::PI - a)
@@ -75,6 +91,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn surfaces_survive_quantization() {
+        for v in [-1.0f32, -0.5, 0.0, 0.33, 1.0] {
+            assert!((dequantize_surface(quantize_surface(v)) - v).abs() < 0.005);
+        }
+        assert_eq!(quantize_surface(7.0), 127);
+    }
+
+    #[test]
     fn spawn_points_are_on_the_ring_and_distinct() {
         let mut seen = std::collections::HashSet::new();
         for i in 0..SPAWN_COUNT {
@@ -82,7 +106,10 @@ mod tests {
             let r = (pos[0] * pos[0] + pos[2] * pos[2]).sqrt();
             assert!((r - SPAWN_RADIUS).abs() < 1.0, "radius {r} at {i}");
             assert_eq!(pos[1], SPAWN_ALTITUDE);
-            assert!(seen.insert((pos[0].to_bits(), pos[2].to_bits())), "duplicate at {i}");
+            assert!(
+                seen.insert((pos[0].to_bits(), pos[2].to_bits())),
+                "duplicate at {i}"
+            );
         }
     }
 

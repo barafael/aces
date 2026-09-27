@@ -46,6 +46,20 @@ fn asset_root() -> String {
 }
 
 fn main() {
+    // `aces-client replay <log.jsonl> …` re-flies a flight log instead of
+    // starting the game (see flight::replay).
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if args.get(1).map(String::as_str) == Some("replay") {
+            if let Err(err) = flight::replay::cli(&args[2..]) {
+                eprintln!("replay: {err}");
+                std::process::exit(1);
+            }
+            return;
+        }
+    }
+
     App::new()
         .add_plugins(
             DefaultPlugins

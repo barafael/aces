@@ -7,3 +7,8 @@ edition = "2024"
 bevy = "0.19"
 aces-protocol = { path = "../aces-protocol" }
 aces-net = { path = "../aces-net" }
+serde = { version = "1", features = ["derive"] }
+
+# The flight recorder / replay (native only: the browser has no filesystem).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+serde_json = { version = "1", features = ["float_roundtrip"] }

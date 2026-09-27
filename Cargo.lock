@@ -95,6 +95,8 @@ dependencies = [
  "aces-net",
  "aces-protocol",
  "bevy",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

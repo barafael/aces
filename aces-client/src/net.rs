@@ -15,13 +15,13 @@
 use bevy::prelude::*;
 
 use aces_net::{
-    broadcast_reliable, broadcast_unreliable, decode, GameStart, MatchboxSocket, NetMsg, NetState,
-    PeerId, PeerState, CH_RELIABLE,
+    CH_RELIABLE, GameStart, MatchboxSocket, NetMsg, NetState, PeerId, PeerState,
+    broadcast_reliable, broadcast_unreliable, decode,
 };
-use aces_protocol::{PlaneSnapshot, SNAPSHOT_HZ};
+use aces_protocol::{PlaneSnapshot, SNAPSHOT_HZ, dequantize_surface, quantize_surface};
 use std::collections::VecDeque;
 
-use crate::flight::{LocalPlane, RemotePlane, SimPose, Velocity};
+use crate::flight::{LocalPlane, RemotePlane, SimPose, Surfaces, Velocity};
 use crate::{NetworkMode, Phase};
 
 pub struct ClientNetPlugin;
@@ -146,16 +146,19 @@ fn handle_socket(
         .filter(|p| !net.greeted.contains(p))
         .copied()
         .collect();
-        if !unacquainted.is_empty() {
-            let (name, aircraft) = (net.name.clone(), net.aircraft);
-            broadcast_reliable(
-                &mut socket,
-                &peers,
-                &NetMsg::Hello { name: name.clone(), aircraft },
-            );
-            if net.is_host && upsert_player(&mut net, &me, name, aircraft) {
-                publish_roster(&mut socket, &peers, &net);
-            }
+    if !unacquainted.is_empty() {
+        let (name, aircraft) = (net.name.clone(), net.aircraft);
+        broadcast_reliable(
+            &mut socket,
+            &peers,
+            &NetMsg::Hello {
+                name: name.clone(),
+                aircraft,
+            },
+        );
+        if net.is_host && upsert_player(&mut net, &me, name, aircraft) {
+            publish_roster(&mut socket, &peers, &net);
+        }
         info!(name = %net.name, greeted = unacquainted.len(), "greeted the room");
         net.greeted.extend(unacquainted);
     }
@@ -256,11 +259,7 @@ pub fn publish_roster(socket: &mut MatchboxSocket, peers: &[PeerId], net: &NetSt
 }
 
 /// Apply the host's `Start`: move from the lobby into the game.
-fn watch_start(
-    net: Res<NetState>,
-    state: Res<State<Phase>>,
-    mut next: ResMut<NextState<Phase>>,
-) {
+fn watch_start(net: Res<NetState>, state: Res<State<Phase>>, mut next: ResMut<NextState<Phase>>) {
     if net.start.is_some() && state.get() == &Phase::Lobby {
         next.set(Phase::InGame);
     }
@@ -275,7 +274,7 @@ fn send_snapshots(
     mut pulse: ResMut<SnapshotPulse>,
     socket: Option<ResMut<MatchboxSocket>>,
     net: Res<NetState>,
-    plane: Single<(&SimPose, &Velocity), With<LocalPlane>>,
+    plane: Single<(&SimPose, &Velocity, &Surfaces), With<LocalPlane>>,
 ) {
     pulse.acc += time.delta_secs();
     if pulse.acc < 1.0 / SNAPSHOT_HZ {
@@ -300,6 +299,11 @@ fn send_snapshots(
             pos: pos.to_array(),
             rot: quat.to_array(),
             vel: plane.1.0.to_array(),
+            surfaces: [
+                quantize_surface(plane.2.elevator),
+                quantize_surface(plane.2.aileron),
+                quantize_surface(plane.2.rudder),
+            ],
         }),
     );
 }
@@ -307,7 +311,11 @@ fn send_snapshots(
 /// Drain received snapshots into the remote planes' histories. Older ticks
 /// than the newest known one are dropped (reorder protection; the tick
 /// wraps only after ~6.8 years at 20 Hz).
-fn apply_snapshots(time: Res<Time>, mut net_in: ResMut<NetIn>, mut remotes: Query<&mut RemotePlane>) {
+fn apply_snapshots(
+    time: Res<Time>,
+    mut net_in: ResMut<NetIn>,
+    mut remotes: Query<&mut RemotePlane>,
+) {
     let now = time.elapsed_secs_f64();
     for (peer, s) in net_in.snapshots.drain(..) {
         let Some(mut remote) = remotes.iter_mut().find(|r| r.peer == peer) else {
@@ -328,51 +336,77 @@ fn apply_snapshots(time: Res<Time>, mut net_in: ResMut<NetIn>, mut remotes: Quer
     }
 }
 
-/// Drive the rendered remote planes from their snapshot histories.
+/// Drive the rendered remote planes (pose and control surfaces) from their
+/// snapshot histories.
 fn interpolate_remotes(
     time: Res<Time>,
-    mut remotes: Query<(&mut RemotePlane, &mut Transform)>,
+    mut remotes: Query<(&RemotePlane, &mut Transform, &mut Surfaces)>,
 ) {
     let now = time.elapsed_secs_f64();
-    for (remote, mut transform) in &mut remotes {
-        if let Some((pos, rot)) = interp_pose(&remote.history, now) {
-            transform.translation = pos;
-            transform.rotation = rot;
+    for (remote, mut transform, mut surfaces) in &mut remotes {
+        if let Some(sample) = interp_pose(&remote.history, now) {
+            transform.translation = sample.pos;
+            transform.rotation = sample.rot;
+            *surfaces = sample.surfaces;
         }
     }
 }
 
-/// Pose a remote plane should render at local time `now`, given its
+/// Where a remote plane renders, and how its surfaces are deflected.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RemoteSample {
+    pub pos: Vec3,
+    pub rot: Quat,
+    pub surfaces: Surfaces,
+}
+
+impl RemoteSample {
+    fn of(s: &PlaneSnapshot) -> Self {
+        Self {
+            pos: Vec3::from(s.pos),
+            rot: Quat::from_array(s.rot).normalize(),
+            surfaces: Surfaces {
+                elevator: dequantize_surface(s.surfaces[0]),
+                aileron: dequantize_surface(s.surfaces[1]),
+                rudder: dequantize_surface(s.surfaces[2]),
+            },
+        }
+    }
+
+    fn lerp(&self, other: &Self, f: f32) -> Self {
+        Self {
+            pos: self.pos.lerp(other.pos, f),
+            rot: self.rot.slerp(other.rot, f),
+            surfaces: Surfaces {
+                elevator: self.surfaces.elevator.lerp(other.surfaces.elevator, f),
+                aileron: self.surfaces.aileron.lerp(other.surfaces.aileron, f),
+                rudder: self.surfaces.rudder.lerp(other.surfaces.rudder, f),
+            },
+        }
+    }
+}
+
+/// What a remote plane should render at local time `now`, given its
 /// `(receive time, snapshot)` history (oldest first).
 ///
 /// Renders [`INTERP_DELAY`] behind the newest sample: normally interpolating
 /// between the two samples bracketing the target time; if the stream stalls,
 /// dead-reckons along the newest velocity for at most [`MAX_EXTRAPOLATION`].
 /// `None` when there is nothing to render yet.
-pub fn interp_pose(
-    history: &VecDeque<(f64, PlaneSnapshot)>,
-    now: f64,
-) -> Option<(Vec3, Quat)> {
-    let (_, newest) = history.back()?;
-    let newest_pose = (
-        Vec3::from(newest.pos),
-        Quat::from_array(newest.rot).normalize(),
-    );
-
+pub fn interp_pose(history: &VecDeque<(f64, PlaneSnapshot)>, now: f64) -> Option<RemoteSample> {
+    let (t_last, newest) = history.back()?;
     let target = now - INTERP_DELAY;
-    let (t_last, _) = *history.back()?;
-    if target >= t_last {
+    if target >= *t_last {
         // Stalled stream: dead-reckon along the last velocity.
         let overshoot = (target - t_last).min(MAX_EXTRAPOLATION) as f32;
-        return Some((
-            newest_pose.0 + Vec3::from(newest.vel) * overshoot,
-            newest_pose.1,
-        ));
+        let mut sample = RemoteSample::of(newest);
+        sample.pos += Vec3::from(newest.vel) * overshoot;
+        return Some(sample);
     }
 
     let (t_first, oldest) = history.front()?;
     if target <= *t_first {
-        return Some((Vec3::from(oldest.pos), Quat::from_array(oldest.rot).normalize()));
+        return Some(RemoteSample::of(oldest));
     }
 
     // Find the bracketing pair and interpolate.
@@ -380,18 +414,11 @@ pub fn interp_pose(
     for next in history.iter().skip(1) {
         if target < next.0 {
             let f = ((target - prev.0) / (next.0 - prev.0)) as f32;
-            let a = &prev.1;
-            let b = &next.1;
-            return Some((
-                Vec3::from(a.pos).lerp(Vec3::from(b.pos), f),
-                Quat::from_array(a.rot)
-                    .normalize()
-                    .slerp(Quat::from_array(b.rot).normalize(), f),
-            ));
+            return Some(RemoteSample::of(&prev.1).lerp(&RemoteSample::of(&next.1), f));
         }
         prev = next;
     }
-    Some(newest_pose)
+    Some(RemoteSample::of(newest))
 }
 
 /// Despawn remote planes whose peer is no longer in the roster.
@@ -419,6 +446,7 @@ mod tests {
                 pos,
                 rot: [0.0, 0.0, 0.0, 1.0],
                 vel,
+                surfaces: [0, 64, -127],
             },
         )
     }
@@ -431,7 +459,12 @@ mod tests {
     #[test]
     fn single_sample_renders_itself() {
         let h = VecDeque::from(vec![snap(10.0, [1.0, 2.0, 3.0], [0.0; 3])]);
-        assert_eq!(interp_pose(&h, 10.0 + 5.0), Some((Vec3::new(1.0, 2.0, 3.0), Quat::IDENTITY)));
+        let sample = interp_pose(&h, 10.0 + 5.0).unwrap();
+        assert_eq!(
+            (sample.pos, sample.rot),
+            (Vec3::new(1.0, 2.0, 3.0), Quat::IDENTITY)
+        );
+        assert_eq!(sample.surfaces.rudder, -1.0);
     }
 
     #[test]
@@ -443,11 +476,11 @@ mod tests {
         ]);
         let now = 1.20; // target = 1.10 - wait: now - 0.1 = 1.10 → newest
         // target 1.10 == t_last → extrapolation branch with overshoot 0.
-        let (pos, _) = interp_pose(&h, now).unwrap();
+        let pos = interp_pose(&h, now).unwrap().pos;
         assert!((pos.x - 10.0).abs() < 1e-4, "{pos:?}");
 
         let now = 1.15; // target 1.05: halfway between the samples
-        let (pos, _) = interp_pose(&h, now).unwrap();
+        let pos = interp_pose(&h, now).unwrap().pos;
         assert!((pos.x - 5.0).abs() < 1e-4, "{pos:?}");
     }
 
@@ -459,7 +492,7 @@ mod tests {
         ]);
         // 0.5 s after the last sample: dead-reckoning is capped at 0.25 s
         // worth of velocity beyond the newest position.
-        let (pos, _) = interp_pose(&h, 1.60).unwrap();
+        let pos = interp_pose(&h, 1.60).unwrap().pos;
         assert!((pos.x - 10.0 - 25.0).abs() < 1e-3, "{pos:?}");
     }
 }

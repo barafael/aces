@@ -40,20 +40,63 @@ host-sequenced events) but change the authority model:
 - **Deathmatch**: unlimited duration, death → explosion → 3 s respawn at a
   random spawn point, score per kill.
 
-## Flight model (semi-realistic)
+## Flight model (War Thunder arcade–style rigid body)
 
-- State: velocity vector; AoA computed from velocity vs nose. Lift ∝ AoA (with
-  stall past critical AoA → lift collapse), induced + parasitic drag, thrust
-  from throttle, gravity.
-- Controls: **mouse = aim cursor, War Thunder arcade style** — the cursor is
-  an aim point; an instructor controller banks into off-axis targets and
-  pulls, flying the nose onto the cursor (flyable with mouse alone). A HUD
-  cursor ring shows the aim point, an orange nose marker shows where the
-  plane actually points. **A/D roll** and **Q/E rudder** add manual inputs,
-  stall possible but forgiving. Hard G limits to keep it playable.
+- Surfaces → moments → attitude → AoA/sideslip → forces. Nothing commands
+  a rotation rate: rate-limited actuators move elevator/ailerons/rudder;
+  pitch and yaw are statically stable (the elevator/rudder set the AoA /
+  sideslip the airframe weathervanes to, stiffness ∝ dynamic pressure),
+  ailerons accelerate the roll against roll damping. Adverse yaw, dihedral
+  effect, roll due to yaw rate; rolling about the body axis under load
+  turns AoA into sideslip — planes slip and twist.
+- Forces: lift from a lift curve that rounds off into flat-plate lift past
+  the stall, parasitic + induced + transonic wave drag, flat-plate drag
+  post-stall and in sideslip, side force from sideslip, thrust (engine
+  spools after the lever; afterburner above 100 %), gravity; exponential
+  atmosphere. Hard turns bleed speed, dives regain it.
+- Stall: lift collapses, the nose breaks down, buffet, roll damping
+  reverses (saturating autorotation) and the windward/retreating wing
+  drops — an incipient spin that recovers hands-off.
+- Controls: **War Thunder mouse aim** — the mouse steers a world-space aim
+  direction and the camera looks along it (plane fixed on screen below the
+  aim circle). The **instructor** flies the nose onto the aim by steering
+  the lift vector: the acceleration ⊥ the path that holds it against
+  gravity plus turns it toward the aim is rolled above the canopy and
+  pulled — wings level when on target, gentle banks for small offsets,
+  bank-and-pull for large ones, push or split-S for aims below. The last
+  few degrees sideways go to the rudder (gun aiming), with an integrator
+  on the nose's lateral error (only near capture and only while the error
+  creeps, so approaches never wind it up) that removes the slip's lag; the
+  pitch channel is damped by the nose's own pitch rate (not the error's —
+  stepwise mouse aim would kick the elevator). While maneuvering the
+  rudder coordinates. Lateral error is measured from the flight path so
+  nose slip can't feed back into the bank (the cause of an early wing-
+  rocking oscillation at small offsets). AoA limit, G limit and ground
+  avoidance (hold **Shift** to fly without them and stall). **A/D** / **Q/E** override roll / rudder.
+- HUD: aim circle, nose cross, flight-path marker (the gap is AoA and
+  sideslip), speed/altitude/throttle/G/AoA readout, stall warning.
 - World: flat ocean plane with a 1 km grid (mipmapped), gradient sky sphere +
   linear distance fog, soft world bounds, scattered spawn points. (Terrain =
   stretch goal.)
+
+## Flight tuning (recorder + replay)
+
+Native builds record every flight to `flightlogs/flight-<UTC>.jsonl`
+(debug builds by default; `ACES_FLIGHT_LOG=<dir>` to choose, `off` to
+disable, release builds only when set). One JSON record per line: a header
+with every tuning constant, the spawn state, a `frame` record per rendered
+frame (raw mouse events, held keys, aim, free look, camera, rendered plane
+pose) and a `tick` record per fixed tick (flight-model input, instructor
+internals, surface command, full state). `M` drops a mark.
+
+`cargo run -- replay flightlogs/<log>.jsonl [--mouse] [--csv out.csv]`
+re-flies the log through the current code (`fly_tick`, shared with the
+game): bit-exact with unchanged constants; after a change it lists the
+constants that changed since the recording and compares twitchiness
+metrics (rates, angular accelerations, control travel/reversals,
+saturation, G onset, sideslip, aim error) recorded vs replayed, for the
+whole flight and ±2 s around each mark. `--mouse` re-derives the aim from
+the raw mouse events (to tune sensitivity/leveling too).
 
 ## Weapons & countermeasures (cone-based, arcade)
 
@@ -71,9 +114,30 @@ host-sequenced events) but change the authority model:
 
 ## Aircraft
 
-5 glTF models (`assets/aircraft/*.glb`) selectable in the lobby, with a stats
-table in aces-protocol: max thrust, mass, max AoA, HP, agility multipliers
-(pitch/roll/yaw). Fallback low-poly placeholder until the real models arrive.
+Aircraft are data: `aces-protocol/src/aircraft.rs` holds the registry
+`AIRCRAFT` (name + `Airframe`), selectable in the lobby (number keys, shown
+when there is more than one). An `Airframe` carries every number the flight
+model and instructor read — aerodynamics (wing loading, lift curve, stall,
+drag polar, wave drag), engine (jet/propeller, dry and boost thrust, thrust
+lapse with speed and density, spool rates), control response (pitch/yaw
+frequencies and damping, roll rate and time constant, dihedral, adverse
+yaw, control stiffening, actuator speed), stall behavior (autorotation,
+wing drop, pitch break, buffet) and structural G limits. The flight code
+has no per-plane constants; the instructor inverts whatever airframe it
+flies, so it needs no per-plane tuning. HP, mass for collisions and the
+glTF model path join the entry in milestones 4–6. Currently: the
+placeholder jet.
+
+Adding a plane: add an `AIRCRAFT` entry (start from `PLACEHOLDER_JET` with
+struct-update syntax), check its envelope with `cargo test -p aces-client
+performance -- --ignored --nocapture` (stall/top/boost speed, roll rate,
+sustained turn), and add it to `test_airframes` if it opens new territory —
+`every_airframe_*` tests fly the instructor's whole battery (level hold,
+small offsets without rocking, 90° turn, G/AoA protection, stall recovery,
+tail slide) on each. Flight logs record the airframe at spawn; `replay`
+re-flies with the aircraft's current definition and lists what changed
+(`--recorded-airframe` flies the logged one). Fallback low-poly
+placeholder model until the real models arrive.
 
 ### glb export recipe (verified against bevy_gltf 0.19)
 
@@ -87,15 +151,17 @@ compression OFF**: bevy 0.19 supports neither Draco, nor meshopt, nor
 
 | Key | Action |
 | --- | --- |
-| `Mouse` | Aim cursor — instructor flies the nose onto it |
-| `A` / `D` | Roll |
-| `Q` / `E` | Rudder |
-| `W` / `S` | Throttle |
+| `Mouse` | Aim (and view) — the instructor flies the nose onto it |
+| `A` / `D` | Roll (overrides the instructor) |
+| `Q` / `E` | Rudder (overrides the instructor) |
+| `W` / `S` | Throttle (past 100 % into afterburner) |
+| `Shift` (hold) | Limiter off: no AoA/G protection or ground avoidance |
 | `Space` | Fire gun |
 | `Ctrl` | Fire selected missile |
 | `1` / `2` / `3` | Select gun / IR missile / radar missile |
 | `F` | Flares |
 | `C` | Chaff |
+| `M` | Mark the flight log ("this felt wrong") |
 | `V` (hold) | Free look: mouse temporarily orbits the camera; release springs back to chase view |
 | `Esc` | Menu |
 
@@ -126,8 +192,14 @@ camera) · `weapons` (gun, missiles, lock, countermeasures, damage) · `net`
 
 ## Decisions log
 
-- Mouse = aim cursor with WT-arcade instructor; V = free look; F/C = separate
-  flare/chaff keys.
+- WT mouse aim: the mouse steers a world-space aim/view direction (cursor
+  locked + hidden in flight), not a screen cursor; the instructor is a
+  model-inverting flight computer (path rate → lift → AoA → elevator) on
+  the fixed tick. V = free look; F/C = separate flare/chaff keys.
+- Rigid-body flight model (moments, AoA/sideslip dynamics, soft stall with
+  wing drop) instead of rate commands: "planes don't fly on rails".
+- Snapshots carry the three surface positions (quantized to i8) so remote
+  airframes animate too.
 - Launching with a room id as the CLI arg / `?room=` parameter skips the
   menu, joins that room, and the elected host auto-starts once the roster
   has ≥ 2 players and every peer has greeted — hands-free two-instance

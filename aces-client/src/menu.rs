@@ -1,7 +1,7 @@
 //! Menu, lobby and in-game overlays: keyboard-driven UI over the 3D scene.
 //!
-//! Flow: Menu (`F` solo, `H` host, `J` join) → Lobby (roster, `1–5` aircraft
-//! select, host `Enter` starts) → InGame (`Esc` leaves). Joining asks for a
+//! Flow: Menu (`F` solo, `H` host, `J` join) → Lobby (roster, number keys
+//! select the aircraft when there is a choice, host `Enter` starts) → InGame (`Esc` leaves). Joining asks for a
 //! room id with a minimal text field.
 //!
 //! For hands-free two-instance testing, launching with a room id as the CLI
@@ -9,16 +9,16 @@
 //! that room, and the host starts once every connected peer has greeted and
 //! the roster holds at least two players.
 
-use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::ButtonState;
+use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
-use bevy::window::CursorOptions;
+use bevy::window::{CursorGrabMode, CursorOptions};
 
 use aces_net::{
-    broadcast_reliable, close_socket, new_seed, open_socket_for, random_room, GameStart,
-    MatchboxSocket, NetMsg, NetState, RoomId,
+    GameStart, MatchboxSocket, NetMsg, NetState, RoomId, broadcast_reliable, close_socket,
+    new_seed, open_socket_for, random_room,
 };
-use aces_protocol::AIRCRAFT_COUNT;
+use aces_protocol::{AIRCRAFT, AIRCRAFT_COUNT, aircraft};
 
 use crate::net::{publish_roster, upsert_player};
 use crate::{NetworkMode, Phase};
@@ -41,7 +41,7 @@ impl Plugin for MenuPlugin {
                     update_lobby.run_if(in_state(Phase::Lobby)),
                     update_in_game.run_if(in_state(Phase::InGame)),
                     update_ui_text,
-                    update_cursor_visibility,
+                    update_cursor,
                 ),
             );
     }
@@ -101,12 +101,7 @@ fn spawn_ui(mut commands: Commands, assets: Res<AssetServer>) {
                     BackgroundColor(Color::srgba(0.05, 0.07, 0.12, 0.82)),
                 ))
                 .with_children(|parent| {
-                    parent.spawn((
-                        MenuText,
-                        Text::default(),
-                        text_font.clone(),
-                        text_color,
-                    ));
+                    parent.spawn((MenuText, Text::default(), text_font.clone(), text_color));
                     parent.spawn((
                         LobbyText,
                         Text::default(),
@@ -255,6 +250,10 @@ fn update_lobby(
         KeyCode::Digit3,
         KeyCode::Digit4,
         KeyCode::Digit5,
+        KeyCode::Digit6,
+        KeyCode::Digit7,
+        KeyCode::Digit8,
+        KeyCode::Digit9,
     ]
     .iter()
     .position(|k| keys.just_pressed(*k));
@@ -340,10 +339,7 @@ fn update_ui_text(
         (&mut Text, &mut Visibility),
         (With<LobbyText>, Without<MenuText>, Without<GameHint>),
     >,
-    mut hint: Query<
-        &mut Visibility,
-        (With<GameHint>, Without<MenuText>, Without<LobbyText>),
-    >,
+    mut hint: Query<&mut Visibility, (With<GameHint>, Without<MenuText>, Without<LobbyText>)>,
 ) {
     let Ok(mut menu) = menu.single_mut() else {
         return;
@@ -368,7 +364,8 @@ fn update_ui_text(
                         .unwrap_or_default()
                 );
             } else {
-                let mut text = String::from("aces\n\nF — fly solo\nH — host a room\nJ — join a room");
+                let mut text =
+                    String::from("aces\n\nF — fly solo\nH — host a room\nJ — join a room");
                 if let Some(room) = &auto_room.0 {
                     text = format!("aces\n\nF — fly solo\nH — host {room}\nJ — join {room}");
                 }
@@ -400,18 +397,26 @@ fn update_ui_text(
                     format!(" ({})", tags.join(", "))
                 };
                 lines.push_str(&format!(
-                    "{}. {} — aircraft {}{}\n",
+                    "{}. {} — {}{}\n",
                     index + 1,
                     player.name,
-                    player.aircraft + 1,
+                    aircraft(player.aircraft).name,
                     tags
                 ));
             }
-            lines.push_str(&format!(
-                "\n1–{} — aircraft (currently {})\n",
-                AIRCRAFT_COUNT,
-                net.aircraft + 1
-            ));
+            if AIRCRAFT_COUNT > 1 {
+                lines.push('\n');
+                for (i, kind) in AIRCRAFT.iter().enumerate() {
+                    let current = if i == usize::from(net.aircraft) {
+                        " (selected)"
+                    } else {
+                        ""
+                    };
+                    lines.push_str(&format!("{} — {}{current}\n", i + 1, kind.name));
+                }
+            } else {
+                lines.push('\n');
+            }
             if net.is_host {
                 lines.push_str("Enter — start\n");
             }
@@ -433,6 +438,24 @@ fn update_ui_text(
     }
 }
 
-fn update_cursor_visibility(phase: Res<State<Phase>>, mut cursor: Single<&mut CursorOptions>) {
-    cursor.visible = phase.get() != &Phase::InGame;
+/// In flight the mouse steers the aim: the cursor is hidden and locked to
+/// the window. Browsers only grant pointer lock from a user gesture, so a
+/// click re-requests it. Menus get the cursor back. Writes only on change,
+/// so the window backend is not asked to re-grab every frame.
+fn update_cursor(
+    phase: Res<State<Phase>>,
+    buttons: Res<ButtonInput<MouseButton>>,
+    mut cursor: Single<&mut CursorOptions>,
+) {
+    let in_game = phase.get() == &Phase::InGame;
+    let grab_mode = if in_game {
+        CursorGrabMode::Locked
+    } else {
+        CursorGrabMode::None
+    };
+    let regrab = in_game && buttons.just_pressed(MouseButton::Left);
+    if cursor.grab_mode != grab_mode || cursor.visible == in_game || regrab {
+        cursor.grab_mode = grab_mode;
+        cursor.visible = !in_game;
+    }
 }
