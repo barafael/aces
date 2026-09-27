@@ -33,12 +33,15 @@ pub struct MenuPlugin;
 impl Plugin for MenuPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<JoinDraft>()
+            .init_resource::<CreditsOpen>()
             .add_systems(Startup, spawn_ui)
             .add_systems(
                 Update,
                 (
                     auto_enter_lobby.run_if(in_state(Phase::Menu)),
-                    update_menu.run_if(in_state(Phase::Menu)),
+                    (toggle_credits, update_menu.run_if(credits_closed))
+                        .chain()
+                        .run_if(in_state(Phase::Menu)),
                     update_lobby.run_if(in_state(Phase::Lobby)),
                     update_in_game.run_if(in_state(Phase::InGame)),
                     update_ui_text,
@@ -47,6 +50,10 @@ impl Plugin for MenuPlugin {
             );
     }
 }
+
+/// The main menu's credits screen is open.
+#[derive(Resource, Default)]
+struct CreditsOpen(bool);
 
 /// State of the join-room text field.
 #[derive(Resource, Default)]
@@ -231,6 +238,43 @@ fn update_menu(
     }
 }
 
+/// `K` opens and closes the credits screen (`Esc` closes it too) — from the
+/// main menu, not while typing a room id.
+fn toggle_credits(
+    keys: Res<ButtonInput<KeyCode>>,
+    draft: Res<JoinDraft>,
+    mut credits: ResMut<CreditsOpen>,
+) {
+    if !draft.active
+        && (keys.just_pressed(KeyCode::KeyK) || credits.0 && keys.just_pressed(KeyCode::Escape))
+    {
+        credits.0 = !credits.0;
+    }
+}
+
+/// Run condition: the main menu (not the credits screen) takes input.
+fn credits_closed(credits: Res<CreditsOpen>) -> bool {
+    !credits.0
+}
+
+/// The credits screen: every third-party asset, as its license asks
+/// (title, author, source, license). `CREDITS.md` has the same.
+fn credits_text() -> String {
+    let mut text = String::from(
+        "aces — credits\n\nAircraft models from Sketchfab (scaled, rotated\nand re-centred in game):\n",
+    );
+    for credit in AIRCRAFT.iter().filter_map(|kind| kind.credit) {
+        text.push_str(&format!(
+            "\n{} — {}\n{}\n{} ({})\n",
+            credit.title, credit.author, credit.source, credit.license, credit.license_url
+        ));
+    }
+    text.push_str(
+        "\nFont: FreeSans Bold (GNU FreeFont),\nFree Software Foundation — GNU GPL\n\nK / Esc — back",
+    );
+    text
+}
+
 #[allow(clippy::too_many_arguments)]
 fn update_lobby(
     mut commands: Commands,
@@ -334,6 +378,7 @@ fn update_ui_text(
     room: Option<Res<RoomId>>,
     auto_room: Res<crate::AutoRoom>,
     draft: Res<JoinDraft>,
+    credits: Res<CreditsOpen>,
     mut menu: Query<&mut Text, With<MenuText>>,
     mut lobby: Query<
         (&mut Text, &mut Visibility),
@@ -355,7 +400,9 @@ fn update_ui_text(
     // state, then touch only what differs.
     let (menu_text, lobby, hint) = match phase.get() {
         Phase::Menu => {
-            let text = if draft.active {
+            let text = if credits.0 {
+                credits_text()
+            } else if draft.active {
                 format!(
                     "aces — join a room\n\nroom: {}_\n\nEnter — join\nEsc — cancel{}",
                     draft.text,
@@ -366,9 +413,9 @@ fn update_ui_text(
                         .unwrap_or_default()
                 )
             } else if let Some(room) = &auto_room.0 {
-                format!("aces\n\nF — fly solo\nH — host {room}\nJ — join {room}")
+                format!("aces\n\nF — fly solo\nH — host {room}\nJ — join {room}\nK — credits")
             } else {
-                String::from("aces\n\nF — fly solo\nH — host a room\nJ — join a room")
+                String::from("aces\n\nF — fly solo\nH — host a room\nJ — join a room\nK — credits")
             };
             (text, None, false)
         }
@@ -458,5 +505,28 @@ fn update_cursor(
     if cursor.grab_mode != grab_mode || cursor.visible == in_game || regrab {
         cursor.grab_mode = grab_mode;
         cursor.visible = !in_game;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The in-game credits carry every model's full attribution.
+    #[test]
+    fn credits_screen_lists_every_credit() {
+        let text = credits_text();
+        for credit in AIRCRAFT.iter().filter_map(|kind| kind.credit) {
+            for part in [
+                credit.title,
+                credit.author,
+                credit.source,
+                credit.license,
+                credit.license_url,
+            ] {
+                assert!(text.contains(part), "credits screen lacks {part:?}");
+            }
+        }
+        assert!(text.contains("GNU GPL"), "font credit missing");
     }
 }

@@ -140,6 +140,10 @@ re-flies with the aircraft's current definition and lists what changed
 (F-15E, F/A-141F, MiG-19) live in `aces-client/assets/models`, which is
 kept out of git (~85 MB of Sketchfab exports; copy the `.glb` files in by
 hand). An aircraft whose model is missing flies the placeholder airframe.
+Third-party models are credited per their licenses (two CC BY-NC-SA 4.0 —
+non-commercial —, one CC BY 4.0): each `AIRCRAFT` entry carries its
+`Credit`, shown on the main menu's credits screen (`K`) and listed in
+`CREDITS.md` (with the font); a test keeps the three in sync.
 Their airframes still fly as the placeholder jet, and `P` cycles the
 displayed model in flight. The client keeps per-model scale/orientation
 fixups (`flight::model_fixup`) — the Sketchfab exports face arbitrary

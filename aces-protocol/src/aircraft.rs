@@ -155,7 +155,28 @@ pub struct AircraftType {
     /// shows the built-in low-poly placeholder airframe. The client needs
     /// per-model corrections (scale/orientation) — see its model fixups.
     pub model: Option<&'static str>,
+    /// Attribution for a third-party model: its license requires it
+    /// wherever the game is shared (shown in game and in `CREDITS.md`).
+    pub credit: Option<Credit>,
 }
+
+/// Attribution for third-party art, as its Creative Commons license asks:
+/// title, author, source and license.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Credit {
+    pub title: &'static str,
+    pub author: &'static str,
+    pub source: &'static str,
+    /// Short license name, e.g. `CC BY 4.0`.
+    pub license: &'static str,
+    pub license_url: &'static str,
+}
+
+/// Both non-commercial models' license.
+const CC_BY_NC_SA_4: (&str, &str) = (
+    "CC BY-NC-SA 4.0",
+    "https://creativecommons.org/licenses/by-nc-sa/4.0/",
+);
 
 /// The placeholder jet everything was tuned on: a ~16 m span fighter,
 /// 1 g stall ~206 km/h, ~1020 km/h dry / ~1080 km/h with afterburner.
@@ -218,21 +239,43 @@ pub const AIRCRAFT: [AircraftType; 4] = [
         name: "Jet (placeholder)",
         airframe: PLACEHOLDER_JET,
         model: None,
+        credit: None,
     },
     AircraftType {
         name: "F-15E Strike Eagle",
         airframe: PLACEHOLDER_JET,
         model: Some("models/f-15e_strike_eagle_-_fighter_jet_-_free.glb"),
+        credit: Some(Credit {
+            title: "F-15E Strike Eagle - Fighter Jet - Free",
+            author: "bohmerang",
+            source: "https://sketchfab.com/3d-models/f-15e-strike-eagle-fighter-jet-free-fff7d75490474e9b964d90cc031c8d01",
+            license: CC_BY_NC_SA_4.0,
+            license_url: CC_BY_NC_SA_4.1,
+        }),
     },
     AircraftType {
         name: "F/A-141F",
         airframe: PLACEHOLDER_JET,
         model: Some("models/f__a-141f_fighter.glb"),
+        credit: Some(Credit {
+            title: "F / A-141F fighter",
+            author: "小微流 (jiagoushi)",
+            source: "https://sketchfab.com/3d-models/f-a-141f-fighter-bb4fa6ed9fef4a52b119e80748327276",
+            license: CC_BY_NC_SA_4.0,
+            license_url: CC_BY_NC_SA_4.1,
+        }),
     },
     AircraftType {
         name: "MiG-19",
         airframe: PLACEHOLDER_JET,
         model: Some("models/mikoyan-gurevich_mig-19.glb"),
+        credit: Some(Credit {
+            title: "Mikoyan-gurevich mig-19",
+            author: "Chenchanchong",
+            source: "https://sketchfab.com/3d-models/mikoyan-gurevich-mig-19-056bde58c01345c59793aaac7e1764bc",
+            license: "CC BY 4.0",
+            license_url: "https://creativecommons.org/licenses/by/4.0/",
+        }),
     },
 ];
 
@@ -286,6 +329,32 @@ impl Airframe {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every third-party model is credited — in the registry (shown in
+    /// game) and in `CREDITS.md` — with its author, source and license.
+    #[test]
+    fn every_model_is_credited() {
+        let credits_md = include_str!("../../CREDITS.md");
+        for kind in AIRCRAFT {
+            let Some(model) = kind.model else { continue };
+            let credit = kind
+                .credit
+                .unwrap_or_else(|| panic!("{} ({model}) has no credit", kind.name));
+            for part in [
+                credit.title,
+                credit.author,
+                credit.source,
+                credit.license,
+                credit.license_url,
+            ] {
+                assert!(
+                    credits_md.contains(part),
+                    "CREDITS.md does not mention {part:?} for {}",
+                    kind.name
+                );
+            }
+        }
+    }
 
     #[test]
     fn unknown_aircraft_fall_back_to_the_first() {
