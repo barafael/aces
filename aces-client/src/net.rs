@@ -37,6 +37,9 @@ impl Plugin for ClientNetPlugin {
                     handle_socket,
                     submit_events,
                     watch_start,
+                    drop_input_outside_game
+                        .after(handle_socket)
+                        .run_if(not(in_state(Phase::InGame))),
                     (
                         send_snapshots,
                         apply_snapshots,
@@ -58,6 +61,16 @@ pub struct NetIn {
     /// `weapons::apply_events`. Includes the host's own submissions
     /// (loopback), so every peer applies through one path.
     pub sequenced: Vec<(u32, GameEvent)>,
+}
+
+/// Only the game consumes [`NetIn`]: outside it (a late joiner waiting in
+/// the lobby while the room flies) snapshots and events would pile up
+/// unbounded and be applied stale on entering the next game.
+fn drop_input_outside_game(mut net_in: ResMut<NetIn>) {
+    if !net_in.snapshots.is_empty() || !net_in.sequenced.is_empty() {
+        net_in.snapshots.clear();
+        net_in.sequenced.clear();
+    }
 }
 
 /// Frame-scoped staging for outgoing game events. Systems push claims
@@ -559,6 +572,30 @@ mod tests {
             world.get::<Health>(plane).unwrap().alive(),
             "never came back"
         );
+    }
+
+    /// Outside the game nothing consumes the staged input, so it is
+    /// dropped instead of piling up and replaying stale on the next start.
+    #[test]
+    fn staged_input_is_dropped_outside_the_game() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = World::new();
+        let mut net_in = NetIn::default();
+        net_in
+            .snapshots
+            .push(("peer".into(), snap(0.0, [0.0; 3], [0.0; 3]).1));
+        net_in.sequenced.push((
+            7,
+            GameEvent::Killed {
+                victim: "a".into(),
+                shooter: "b".into(),
+            },
+        ));
+        world.insert_resource(net_in);
+        world.run_system_once(drop_input_outside_game).unwrap();
+        let net_in = world.resource::<NetIn>();
+        assert!(net_in.snapshots.is_empty() && net_in.sequenced.is_empty());
     }
 
     #[test]

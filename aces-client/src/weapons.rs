@@ -557,6 +557,7 @@ fn spawn_missile_entity(
         MeshMaterial3d(assets.missile_material.clone()),
         Transform::from_translation(pos).with_rotation(quat),
         Visibility::default(),
+        DespawnOnExit(Phase::InGame),
     ));
 }
 
@@ -575,6 +576,7 @@ fn spawn_explosion(commands: &mut Commands, assets: &WeaponAssets, pos: Vec3, si
         MeshMaterial3d(assets.explosion_fade[0].clone()),
         Transform::from_translation(pos),
         Visibility::default(),
+        DespawnOnExit(Phase::InGame),
     ));
 }
 
@@ -840,6 +842,58 @@ mod tests {
             age: 0.0,
             motor: 0.0,
         }
+    }
+
+    /// Missiles and explosions belong to the game: leaving it (back to the
+    /// menu) cleans them up instead of leaving them frozen in the scene.
+    #[test]
+    fn leaving_the_game_clears_missiles_and_explosions() {
+        use bevy::state::app::StatesPlugin;
+
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, StatesPlugin))
+            .init_state::<Phase>();
+        app.world_mut()
+            .resource_mut::<NextState<Phase>>()
+            .set(Phase::InGame);
+        app.update();
+
+        let assets = WeaponAssets {
+            missile_mesh: default(),
+            missile_material: default(),
+            explosion_mesh: default(),
+            explosion_fade: vec![default(); EXPLOSION_FADE_STEPS],
+        };
+        let mut commands = app.world_mut().commands();
+        spawn_missile_entity(
+            &mut commands,
+            &assets,
+            "me",
+            0,
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            300.0,
+            None,
+        );
+        spawn_explosion(&mut commands, &assets, Vec3::ZERO, 8.0);
+        app.world_mut().flush();
+        let count = |app: &mut App| {
+            let world = app.world_mut();
+            let missiles = world.query::<&Missile>().iter(world).count();
+            let explosions = world.query::<&Explosion>().iter(world).count();
+            (missiles, explosions)
+        };
+        assert_eq!(count(&mut app), (1, 1));
+
+        app.world_mut()
+            .resource_mut::<NextState<Phase>>()
+            .set(Phase::Menu);
+        app.update();
+        assert_eq!(
+            count(&mut app),
+            (0, 0),
+            "missiles/explosions survived leaving the game"
+        );
     }
 
     /// Every peer simulates every missile, but a hit is claimed exactly
