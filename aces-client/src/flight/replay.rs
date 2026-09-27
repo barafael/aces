@@ -114,11 +114,7 @@ impl Sample {
             tick: r.tick,
             t: r.t,
             state: r.state.to_state(),
-            command: Surfaces {
-                elevator: r.command[0],
-                aileron: r.command[1],
-                rudder: r.command[2],
-            },
+            command: Surfaces::from_array(r.command),
             debug: r.instructor,
         }
     }
@@ -449,9 +445,14 @@ fn tuning_changes(then: &Tuning, now: &Tuning) -> Vec<String> {
 /// Names of airframe numbers (before format 3 they sat in the header's
 /// tuning table next to the controller's).
 fn is_airframe_constant(name: &str) -> bool {
-    airframe_tuning(&aces_protocol::AIRCRAFT[0].airframe)
-        .iter()
-        .any(|(n, _)| *n == name)
+    static NAMES: std::sync::LazyLock<std::collections::HashSet<&'static str>> =
+        std::sync::LazyLock::new(|| {
+            airframe_tuning(&aces_protocol::AIRCRAFT[0].airframe)
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect()
+        });
+    NAMES.contains(name)
 }
 
 /// The full replay report for `log`; writes the CSV if asked.

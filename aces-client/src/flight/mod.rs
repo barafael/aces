@@ -43,7 +43,9 @@ pub fn tuning() -> Vec<(&'static str, f32)> {
     all
 }
 
+use bevy::gltf::GltfAssetLabel;
 use bevy::prelude::*;
+use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
 
 use aces_net::NetState;
 use aces_protocol::{PlaneSnapshot, spawn_point};
@@ -64,6 +66,7 @@ impl Plugin for FlightPlugin {
         app.init_resource::<FlightInput>()
             .init_resource::<FreeLook>()
             .init_resource::<MouseAim>()
+            .add_systems(Startup, init_plane_assets)
             .add_systems(OnEnter(crate::Phase::InGame), spawn_planes)
             .add_systems(OnExit(crate::Phase::InGame), despawn_planes)
             .add_systems(
@@ -72,6 +75,8 @@ impl Plugin for FlightPlugin {
                     input::gather_input.run_if(in_state(crate::Phase::InGame)),
                     interpolate_pose,
                     animate_control_surfaces,
+                    cycle_aircraft.run_if(in_state(crate::Phase::InGame)),
+                    drop_missing_models,
                     camera::update_camera
                         .after(input::gather_input)
                         .after(interpolate_pose),
@@ -146,8 +151,8 @@ impl SimPose {
 fn interpolate_pose(fixed: Res<Time<Fixed>>, mut planes: Query<(&SimPose, &mut Transform)>) {
     let t = fixed.overstep_fraction();
     for (pose, mut transform) in &mut planes {
-        transform.translation = pose.previous.0.lerp(pose.current.0, t);
-        transform.rotation = pose.previous.1.slerp(pose.current.1, t);
+        (transform.translation, transform.rotation) =
+            pose.previous.interpolate_stable(&pose.current, t);
     }
 }
 
@@ -176,6 +181,21 @@ pub struct Surfaces {
     pub rudder: f32,
 }
 
+impl Surfaces {
+    /// `[elevator, aileron, rudder]`: the order logs and snapshots use.
+    pub fn to_array(self) -> [f32; 3] {
+        [self.elevator, self.aileron, self.rudder]
+    }
+
+    pub fn from_array([elevator, aileron, rudder]: [f32; 3]) -> Self {
+        Self {
+            elevator,
+            aileron,
+            rudder,
+        }
+    }
+}
+
 /// A visible, deflecting control surface on an airframe.
 #[derive(Component, Clone, Copy)]
 pub enum ControlSurface {
@@ -201,7 +221,7 @@ pub const RUDDER_DEFLECT: f32 = 28f32.to_radians();
 /// plane at slot 0.
 fn spawn_planes(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
+    assets: Res<PlaneAssets>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     net: Res<NetState>,
     mode: Res<crate::NetworkMode>,
@@ -210,7 +230,7 @@ fn spawn_planes(
     // The aircraft chosen in the lobby (solo keeps the last choice).
     let mine = Aircraft::of_type(net.aircraft);
     if *mode == crate::NetworkMode::Solo {
-        *aim = spawn_local(&mut commands, &mut meshes, &mut materials, 0, mine);
+        *aim = spawn_local(&mut commands, &assets, 0, mine);
         return;
     }
 
@@ -222,7 +242,7 @@ fn spawn_planes(
         }
         spawn_remote(
             &mut commands,
-            &mut meshes,
+            &assets,
             &mut materials,
             &player.peer,
             index,
@@ -230,7 +250,97 @@ fn spawn_planes(
         );
     }
     let index = net.my_index().unwrap_or(0);
-    *aim = spawn_local(&mut commands, &mut meshes, &mut materials, index, mine);
+    *aim = spawn_local(&mut commands, &assets, index, mine);
+}
+
+/// Meshes and materials every placeholder airframe shares, built once:
+/// shared handles let the renderer batch the planes, and nothing is
+/// re-uploaded when a game starts. (Only remote tints are per plane.)
+#[derive(Resource)]
+pub struct PlaneAssets {
+    fuselage: Handle<Mesh>,
+    wing: Handle<Mesh>,
+    stabilizer: Handle<Mesh>,
+    fin: Handle<Mesh>,
+    elevator: Handle<Mesh>,
+    aileron: Handle<Mesh>,
+    rudder: Handle<Mesh>,
+    surface_material: Handle<StandardMaterial>,
+    local_fuselage: Handle<StandardMaterial>,
+    local_accent: Handle<StandardMaterial>,
+    /// glTF scene per aircraft, by [`aces_protocol::AIRCRAFT`] index;
+    /// `None` (the placeholder, or a model that failed to load) keeps the
+    /// procedural airframe. All are loaded up front so `P` cycles
+    /// instantly.
+    scenes: Vec<Option<Handle<WorldAsset>>>,
+}
+
+impl PlaneAssets {
+    /// The airframe variant shown for aircraft `selected`: its model, or
+    /// the placeholder (`0`) while it has none — the `.glb` files are kept
+    /// out of git, so a fresh checkout has none of them.
+    fn shown(&self, selected: u8) -> u8 {
+        if self
+            .scenes
+            .get(usize::from(selected))
+            .is_some_and(Option::is_some)
+        {
+            selected
+        } else {
+            0
+        }
+    }
+}
+
+fn init_plane_assets(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    assets: Res<AssetServer>,
+) {
+    let mut material = |color: Color, roughness: f32| {
+        materials.add(StandardMaterial {
+            base_color: color,
+            perceptual_roughness: roughness,
+            ..default()
+        })
+    };
+    let surface_material = material(Color::srgb(0.38, 0.40, 0.43), 0.7);
+    let local_fuselage = material(Color::srgb(0.55, 0.57, 0.60), 0.6);
+    let local_accent = material(Color::srgb(0.25, 0.27, 0.30), 0.7);
+    let scenes = aces_protocol::AIRCRAFT
+        .iter()
+        .map(|kind| {
+            kind.model
+                .map(|path| assets.load(GltfAssetLabel::Scene(0).from_asset(path)))
+        })
+        .collect();
+    commands.insert_resource(PlaneAssets {
+        fuselage: meshes.add(Capsule3d::new(1.2, 12.0)),
+        wing: meshes.add(Cuboid::new(16.0, 0.4, 2.6)),
+        stabilizer: meshes.add(Cuboid::new(6.0, 0.3, 1.6)),
+        fin: meshes.add(Cuboid::new(0.3, 2.4, 2.0)),
+        elevator: meshes.add(Cuboid::new(5.4, 0.12, 0.5)),
+        aileron: meshes.add(Cuboid::new(2.4, 0.12, 0.55)),
+        rudder: meshes.add(Cuboid::new(0.12, 2.0, 0.8)),
+        surface_material,
+        local_fuselage,
+        local_accent,
+        scenes,
+    });
+}
+
+/// A fresh plane of airframe `airframe` at spawn slot `index`, flying level
+/// along the ring at spawn speed. Shared by the first spawn and respawns.
+pub fn spawn_state(index: usize, airframe: &aces_protocol::Airframe) -> FlightState {
+    let (pos, yaw) = spawn_point(index);
+    let speed = SPAWN_SPEED_STALLS * airframe.stall_speed();
+    FlightState::new(
+        pos.into(),
+        Quat::from_rotation_y(yaw),
+        speed,
+        SPAWN_THROTTLE,
+    )
 }
 
 /// Spawn speed in multiples of the airframe's 1 g stall speed (~180 m/s
@@ -242,26 +352,12 @@ const SPAWN_THROTTLE: f32 = 1.0;
 /// pointing along its nose.
 fn spawn_local(
     commands: &mut Commands,
-    meshes: &mut ResMut<Assets<Mesh>>,
-    materials: &mut ResMut<Assets<StandardMaterial>>,
+    assets: &PlaneAssets,
     index: usize,
     aircraft: Aircraft,
 ) -> MouseAim {
-    let (pos, yaw) = spawn_point(index);
-    let quat = Quat::from_rotation_y(yaw);
-    let speed = SPAWN_SPEED_STALLS * aircraft.airframe.stall_speed();
-    let state = FlightState::new(pos.into(), quat, speed, SPAWN_THROTTLE);
-
-    let fuselage = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.55, 0.57, 0.60),
-        perceptual_roughness: 0.6,
-        ..default()
-    });
-    let accent = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.25, 0.27, 0.30),
-        perceptual_roughness: 0.7,
-        ..default()
-    });
+    let state = spawn_state(index, &aircraft.airframe);
+    let (pos, quat) = (state.pos, state.quat);
 
     commands
         .spawn((
@@ -270,15 +366,21 @@ fn spawn_local(
             state,
             crate::weapons::Health::full(),
             Instructor::default(),
-            SimPose::new(pos.into(), quat),
+            SimPose::new(pos, quat),
             Velocity(state.vel),
             Surfaces::default(),
-            model::TickTelemetry::default(),
-            Transform::from_translation(pos.into()).with_rotation(quat),
+            model::LastCommand::default(),
+            Transform::from_translation(pos).with_rotation(quat),
             Visibility::default(),
         ))
         .with_children(|parent| {
-            spawn_airframe(parent, meshes, materials, fuselage, accent);
+            spawn_airframe(
+                parent,
+                assets,
+                aircraft.index,
+                assets.local_fuselage.clone(),
+                assets.local_accent.clone(),
+            );
         });
     MouseAim::new(quat)
 }
@@ -287,7 +389,7 @@ fn spawn_local(
 /// the peer id so planes are tellable apart).
 fn spawn_remote(
     commands: &mut Commands,
-    meshes: &mut ResMut<Assets<Mesh>>,
+    assets: &PlaneAssets,
     materials: &mut ResMut<Assets<StandardMaterial>>,
     peer: &str,
     index: usize,
@@ -327,63 +429,177 @@ fn spawn_remote(
             Visibility::default(),
         ))
         .with_children(|parent| {
-            spawn_airframe(parent, meshes, materials, fuselage, accent);
+            spawn_airframe(parent, assets, aircraft.index, fuselage, accent);
         });
 }
 
-/// The placeholder low-poly airframe shared by local and remote planes
-/// (replaced by glTF models in milestone 6), with hinged control surfaces
-/// that [`animate_control_surfaces`] deflects.
+/// One displayed airframe variant on a plane: the procedural placeholder is
+/// `0`, the glTF models sit at their [`aces_protocol::AIRCRAFT`] index.
+/// Every plane carries every variant; exactly one is visible, and
+/// [`cycle_aircraft`] swaps between them.
+#[derive(Component, Clone, Copy)]
+struct AirframeModel(u8);
+
+/// `P` cycles the local plane through every aircraft. All airframes fly
+/// identically right now, so this is purely visual (the HUD name follows
+/// the swapped type).
+fn cycle_aircraft(
+    keys: Res<ButtonInput<KeyCode>>,
+    assets: Res<PlaneAssets>,
+    mut planes: Query<(&mut Aircraft, &Children), With<LocalPlane>>,
+    mut models: Query<(&AirframeModel, &mut Visibility)>,
+) {
+    if !keys.just_pressed(KeyCode::KeyP) {
+        return;
+    }
+    let Ok((mut aircraft, children)) = planes.single_mut() else {
+        return;
+    };
+    aircraft.index = (aircraft.index + 1) % aces_protocol::AIRCRAFT_COUNT;
+    show_model(children, assets.shown(aircraft.index), &mut models);
+}
+
+/// Make exactly airframe variant `shown` visible among a plane's
+/// `children`.
+fn show_model(
+    children: &Children,
+    shown: u8,
+    models: &mut Query<(&AirframeModel, &mut Visibility)>,
+) {
+    let mut iter = models.iter_many_mut(children);
+    while let Some((model, mut visibility)) = iter.fetch_next() {
+        visibility.set_if_neq(if model.0 == shown {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        });
+    }
+}
+
+/// A model that failed to load (e.g. its `.glb` is not in this checkout)
+/// is dropped, and every plane showing it falls back to the placeholder
+/// instead of flying invisible.
+fn drop_missing_models(
+    server: Res<AssetServer>,
+    mut assets: ResMut<PlaneAssets>,
+    planes: Query<(&Aircraft, &Children)>,
+    mut models: Query<(&AirframeModel, &mut Visibility)>,
+) {
+    let failed = |scene: &Option<Handle<WorldAsset>>| {
+        scene
+            .as_ref()
+            .is_some_and(|handle| server.load_state(handle.id()).is_failed())
+    };
+    if !assets.scenes.iter().any(failed) {
+        return;
+    }
+    for (index, scene) in assets.scenes.iter_mut().enumerate() {
+        if failed(scene) {
+            let name = aces_protocol::aircraft(index as u8).name;
+            warn!("the {name} model did not load; showing the placeholder airframe");
+            *scene = None;
+        }
+    }
+    for (aircraft, children) in &planes {
+        show_model(children, assets.shown(aircraft.index), &mut models);
+    }
+}
+
+/// Per-model corrections for the glTF airframes: the Sketchfab exports face
+/// arbitrary axes, are wildly off scale and are not centered. The rotation
+/// aims the nose along -Z (the airframe convention), the scale brings the
+/// model to its real-world meters, the translation centers the pivot on
+/// the fuselage (values measured from the vertex bounding boxes).
+fn model_fixup(index: u8) -> Transform {
+    match index {
+        // F-15E: nose +X, 194 units long → yaw +90°, 1/10, recentre.
+        1 => Transform {
+            translation: Vec3::new(0.0, -0.98, 4.51),
+            rotation: Quat::from_rotation_y(core::f32::consts::FRAC_PI_2),
+            scale: Vec3::splat(0.1),
+        },
+        // F/A-141F: nose -X, 1177 units long → yaw -90°, ~1/62, recentre.
+        2 => Transform {
+            translation: Vec3::new(-14.66, 0.0, -0.04),
+            rotation: Quat::from_rotation_y(-core::f32::consts::FRAC_PI_2),
+            scale: Vec3::splat(0.016),
+        },
+        // MiG-19: nose -Z already, ~2.2× too big → no yaw, 0.45, recentre.
+        3 => Transform {
+            translation: Vec3::new(0.0, -0.63, -1.44),
+            rotation: Quat::IDENTITY,
+            scale: Vec3::splat(0.45),
+        },
+        _ => Transform::default(),
+    }
+}
+
+/// Every displayed airframe variant (the procedural placeholder with its
+/// hinged control surfaces plus one glTF model per real aircraft), tagged
+/// by [`AirframeModel`]; exactly the plane's own `selected` one is visible.
+/// The glTF models carry no hinges — their surfaces don't animate yet.
 fn spawn_airframe(
     parent: &mut bevy::ecs::hierarchy::ChildSpawnerCommands,
-    meshes: &mut ResMut<Assets<Mesh>>,
-    materials: &mut ResMut<Assets<StandardMaterial>>,
+    assets: &PlaneAssets,
+    selected: u8,
     fuselage: Handle<StandardMaterial>,
     accent: Handle<StandardMaterial>,
 ) {
+    let shown = assets.shown(selected);
+    let visible = |index: u8| {
+        if index == shown {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        }
+    };
+
+    // ── Procedural placeholder (aircraft 0) ─────────────────────────────────
+    let placeholder = || (AirframeModel(0), visible(0));
+
     // Fuselage: capsule lying along -Z/+Z.
     parent.spawn((
-        Mesh3d(meshes.add(Capsule3d::new(1.2, 12.0))),
+        placeholder(),
+        Mesh3d(assets.fuselage.clone()),
         MeshMaterial3d(fuselage.clone()),
         Transform::from_rotation(Quat::from_rotation_x(core::f32::consts::FRAC_PI_2)),
     ));
     // Main wings.
     parent.spawn((
-        Mesh3d(meshes.add(Cuboid::new(16.0, 0.4, 2.6))),
+        placeholder(),
+        Mesh3d(assets.wing.clone()),
         MeshMaterial3d(fuselage.clone()),
         Transform::from_xyz(0.0, 0.0, 0.5),
     ));
     // Horizontal stabilizer.
     parent.spawn((
-        Mesh3d(meshes.add(Cuboid::new(6.0, 0.3, 1.6))),
+        placeholder(),
+        Mesh3d(assets.stabilizer.clone()),
         MeshMaterial3d(fuselage.clone()),
         Transform::from_xyz(0.0, 0.3, 6.2),
     ));
     // Vertical fin.
     parent.spawn((
-        Mesh3d(meshes.add(Cuboid::new(0.3, 2.4, 2.0))),
-        MeshMaterial3d(accent.clone()),
+        placeholder(),
+        Mesh3d(assets.fin.clone()),
+        MeshMaterial3d(accent),
         Transform::from_xyz(0.0, 1.4, 6.2),
     ));
 
     // Control surfaces: each is a hinge entity on the hinge line with the
     // panel offset behind it, so rotating the hinge swings the panel.
-    let surface_material = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.38, 0.40, 0.43),
-        perceptual_roughness: 0.7,
-        ..default()
-    });
+    let surface_material = &assets.surface_material;
 
     // Elevator: stabilizer trailing edge (stabilizer chord ends at z = 7.0).
     parent
         .spawn((
+            placeholder(),
             ControlSurface::Elevator,
             Transform::from_xyz(0.0, 0.3, 6.8),
-            Visibility::default(),
         ))
         .with_children(|hinge| {
             hinge.spawn((
-                Mesh3d(meshes.add(Cuboid::new(5.4, 0.12, 0.5))),
+                Mesh3d(assets.elevator.clone()),
                 MeshMaterial3d(surface_material.clone()),
                 Transform::from_xyz(0.0, 0.0, 0.3),
             ));
@@ -393,13 +609,13 @@ fn spawn_airframe(
     for (x, left) in [(-6.3, true), (6.3, false)] {
         parent
             .spawn((
+                placeholder(),
                 ControlSurface::Aileron { left },
                 Transform::from_xyz(x, 0.0, 1.55),
-                Visibility::default(),
             ))
             .with_children(|hinge| {
                 hinge.spawn((
-                    Mesh3d(meshes.add(Cuboid::new(2.4, 0.12, 0.55))),
+                    Mesh3d(assets.aileron.clone()),
                     MeshMaterial3d(surface_material.clone()),
                     Transform::from_xyz(0.0, 0.0, 0.32),
                 ));
@@ -409,17 +625,29 @@ fn spawn_airframe(
     // Rudder: fin trailing edge (fin chord ends at z = 7.2).
     parent
         .spawn((
+            placeholder(),
             ControlSurface::Rudder,
             Transform::from_xyz(0.0, 1.5, 6.9),
-            Visibility::default(),
         ))
         .with_children(|hinge| {
             hinge.spawn((
-                Mesh3d(meshes.add(Cuboid::new(0.12, 2.0, 0.8))),
+                Mesh3d(assets.rudder.clone()),
                 MeshMaterial3d(surface_material.clone()),
                 Transform::from_xyz(0.0, 0.0, 0.45),
             ));
         });
+
+    // ── glTF models ─────────────────────────────────────────────────────────
+    for (index, scene) in assets.scenes.iter().enumerate() {
+        let Some(scene) = scene else { continue };
+        let index = index as u8;
+        parent.spawn((
+            AirframeModel(index),
+            model_fixup(index),
+            WorldAssetRoot(scene.clone()),
+            visible(index),
+        ));
+    }
 }
 
 /// Deflect every plane's control surfaces to the actuator positions in its
@@ -429,20 +657,20 @@ fn spawn_airframe(
 /// right → right aileron up, left down; yaw right → rudder trailing edge
 /// right.
 fn animate_control_surfaces(
-    planes: Query<&Surfaces>,
-    mut hinges: Query<(&ControlSurface, &mut Transform, &ChildOf)>,
+    planes: Query<(&Surfaces, &Children), Changed<Surfaces>>,
+    mut hinges: Query<(&ControlSurface, &mut Transform)>,
 ) {
-    for (surface, mut transform, child_of) in &mut hinges {
-        let Ok(s) = planes.get(child_of.parent()) else {
-            continue;
-        };
-        let (axis, angle) = match surface {
-            ControlSurface::Elevator => (Vec3::X, -s.elevator * ELEVATOR_DEFLECT),
-            ControlSurface::Aileron { left: true } => (Vec3::X, s.aileron * AILERON_DEFLECT),
-            ControlSurface::Aileron { left: false } => (Vec3::X, -s.aileron * AILERON_DEFLECT),
-            ControlSurface::Rudder => (Vec3::Y, s.rudder * RUDDER_DEFLECT),
-        };
-        transform.rotation = Quat::from_axis_angle(axis, angle);
+    for (s, children) in &planes {
+        let mut iter = hinges.iter_many_mut(children);
+        while let Some((surface, mut transform)) = iter.fetch_next() {
+            let (axis, angle) = match surface {
+                ControlSurface::Elevator => (Vec3::X, -s.elevator * ELEVATOR_DEFLECT),
+                ControlSurface::Aileron { left: true } => (Vec3::X, s.aileron * AILERON_DEFLECT),
+                ControlSurface::Aileron { left: false } => (Vec3::X, -s.aileron * AILERON_DEFLECT),
+                ControlSurface::Rudder => (Vec3::Y, s.rudder * RUDDER_DEFLECT),
+            };
+            transform.rotation = Quat::from_axis_angle(axis, angle);
+        }
     }
 }
 
@@ -460,6 +688,28 @@ fn despawn_planes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Aircraft whose model is missing show the placeholder, not nothing.
+    #[test]
+    fn missing_models_show_the_placeholder() {
+        let assets = PlaneAssets {
+            fuselage: default(),
+            wing: default(),
+            stabilizer: default(),
+            fin: default(),
+            elevator: default(),
+            aileron: default(),
+            rudder: default(),
+            surface_material: default(),
+            local_fuselage: default(),
+            local_accent: default(),
+            scenes: vec![None, Some(default()), None],
+        };
+        assert_eq!(assets.shown(0), 0);
+        assert_eq!(assets.shown(1), 1, "a loaded model is shown");
+        assert_eq!(assets.shown(2), 0, "a missing model falls back");
+        assert_eq!(assets.shown(9), 0, "an unknown aircraft falls back");
+    }
     use bevy::input::InputPlugin;
     use bevy::input::mouse::MouseMotion;
     use bevy::time::TimeUpdateStrategy;
@@ -491,7 +741,7 @@ mod tests {
                 SimPose::new(state.pos, state.quat),
                 Velocity(state.vel),
                 Surfaces::default(),
-                model::TickTelemetry::default(),
+                model::LastCommand::default(),
             ))
             .id();
 
@@ -588,7 +838,7 @@ mod tests {
             SimPose::new(state.pos, state.quat),
             Velocity(state.vel),
             Surfaces::default(),
-            model::TickTelemetry::default(),
+            model::LastCommand::default(),
             Transform::from_translation(state.pos).with_rotation(quat),
         ));
         app.world_mut()

@@ -136,8 +136,14 @@ sustained turn), and add it to `test_airframes` if it opens new territory —
 small offsets without rocking, 90° turn, G/AoA protection, stall recovery,
 tail slide) on each. Flight logs record the airframe at spawn; `replay`
 re-flies with the aircraft's current definition and lists what changed
-(`--recorded-airframe` flies the logged one). Fallback low-poly
-placeholder model until the real models arrive.
+(`--recorded-airframe` flies the logged one). The three real models
+(F-15E, F/A-141F, MiG-19) live in `aces-client/assets/models`, which is
+kept out of git (~85 MB of Sketchfab exports; copy the `.glb` files in by
+hand). An aircraft whose model is missing flies the placeholder airframe.
+Their airframes still fly as the placeholder jet, and `P` cycles the
+displayed model in flight. The client keeps per-model scale/orientation
+fixups (`flight::model_fixup`) — the Sketchfab exports face arbitrary
+axes, are wildly off scale and are not centered.
 
 ### glb export recipe (verified against bevy_gltf 0.19)
 
@@ -162,6 +168,7 @@ compression OFF**: bevy 0.19 supports neither Draco, nor meshopt, nor
 | `F` | Flares |
 | `C` | Chaff |
 | `M` | Mark the flight log ("this felt wrong") |
+| `P` | Cycle the displayed aircraft (models; airframes identical so far) |
 | `V` (hold) | Free look: mouse temporarily orbits the camera; release springs back to chase view |
 | `Esc` | Menu |
 

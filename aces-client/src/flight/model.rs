@@ -150,12 +150,16 @@ pub fn control_effectiveness(a: &Airframe, speed: f32) -> f32 {
     1.0 / (1.0 + over * over)
 }
 
+/// How far into the boost range (afterburner / WEP) `throttle` is, 0..=1.
+pub fn boost_fraction(throttle: f32) -> f32 {
+    ((throttle - 1.0) / (THROTTLE_MAX - 1.0)).clamp(0.0, 1.0)
+}
+
 /// Specific thrust [m/s²] at `throttle` in [0, THROTTLE_MAX], density ratio
 /// `sigma` and airspeed `speed`.
 pub fn thrust(a: &Airframe, throttle: f32, sigma: f32, speed: f32) -> f32 {
     let dry = throttle.min(1.0) * a.thrust_mil;
-    let boost =
-        ((throttle - 1.0) / (THROTTLE_MAX - 1.0)).clamp(0.0, 1.0) * (a.thrust_boost - a.thrust_mil);
+    let boost = boost_fraction(throttle) * (a.thrust_boost - a.thrust_mil);
     let lapse = (1.0 - a.thrust_lapse * speed / V_REF).max(0.0);
     (dry + boost) * sigma.powf(a.thrust_density_exponent) * lapse
 }
@@ -171,21 +175,35 @@ fn stall_blend(a: &Airframe, alpha: f32) -> f32 {
     positive.max(negative)
 }
 
-/// Lift coefficient at any angle of attack: linear while the flow is
-/// attached, blending into flat-plate lift through the stall band, so the
-/// peak rounds off instead of falling off a cliff.
-pub fn lift_coefficient(a: &Airframe, alpha: f32) -> f32 {
-    let linear = a.cl0 + a.cl_alpha * alpha;
+/// Lift coefficient at `alpha` for stall blend `stall` ([`stall_blend`]):
+/// linear while the flow is attached, blending into flat-plate lift through
+/// the stall band, so the peak rounds off instead of falling off a cliff.
+fn lift_curve(a: &Airframe, alpha: f32, stall: f32) -> f32 {
+    let linear = a.linear_lift(alpha);
     let plate = a.cl_plate * (2.0 * alpha).sin();
-    linear + (plate - linear) * stall_blend(a, alpha)
+    linear + (plate - linear) * stall
 }
 
-/// Drag coefficient at angle of attack `alpha`, sideslip `beta` and `mach`.
-pub fn drag_coefficient(a: &Airframe, alpha: f32, beta: f32, mach: f32) -> f32 {
-    let cl = lift_coefficient(a, alpha);
+/// Lift coefficient at any angle of attack.
+#[cfg(test)]
+pub fn lift_coefficient(a: &Airframe, alpha: f32) -> f32 {
+    lift_curve(a, alpha, stall_blend(a, alpha))
+}
+
+/// Drag coefficient for lift coefficient `cl` (from [`lift_curve`]), stall
+/// blend `stall`, angle of attack `alpha`, sideslip `beta` and `mach`.
+fn drag_curve(a: &Airframe, cl: f32, stall: f32, alpha: f32, beta: f32, mach: f32) -> f32 {
     let wave = a.wave_drag * smoothstep(a.wave_mach[0], a.wave_mach[1], mach);
-    let plate = stall_blend(a, alpha) * alpha.sin().powi(2) + beta.sin().powi(2);
+    let plate = stall * alpha.sin().powi(2) + beta.sin().powi(2);
     a.cd0 + wave + a.k_induced * cl * cl + a.cd_plate * plate
+}
+
+/// Bank angle of attitude `quat` [rad]: positive right wing down, ±π
+/// inverted. Meaningless pointing straight up or down.
+pub fn bank_angle(quat: Quat) -> f32 {
+    let right = quat * Vec3::X;
+    let up = quat * Vec3::Y;
+    (-right.y).atan2(up.y)
 }
 
 // ── Simulation state ────────────────────────────────────────────────────────
@@ -307,13 +325,7 @@ pub fn step(s: &mut FlightState, a: &Airframe, command: &Surfaces, throttle_delt
     // Pitch/yaw: weathervane toward the commanded AoA/sideslip, damped
     // against the nose moving relative to the flight path (α̇, β̇).
     let elevator = s.surfaces.elevator;
-    let alpha_cmd = eff
-        * elevator
-        * if elevator >= 0.0 {
-            a.elevator_alpha_up
-        } else {
-            a.elevator_alpha_down
-        };
+    let alpha_cmd = eff * elevator * a.elevator_alpha(elevator);
     let beta_cmd = -s.surfaces.rudder * a.rudder_beta * eff;
     // The stall break drops the nose (positive AoA) or raises it (negative).
     // It fades out toward ±90° and is absent in reverse flow, so tail-first
@@ -365,9 +377,11 @@ pub fn step(s: &mut FlightState, a: &Airframe, command: &Surfaces, throttle_delt
         // Lift ⊥ velocity, in the symmetry plane (⊥ the wing span).
         let lift_dir = right.cross(v_dir).normalize_or_zero();
         let side_dir = v_dir.cross(lift_dir);
-        acc += lift_dir * (pressure * lift_coefficient(a, alpha));
+        let cl = lift_curve(a, alpha, stall);
+        let cd = drag_curve(a, cl, stall, alpha, beta, speed / SPEED_OF_SOUND);
+        acc += lift_dir * (pressure * cl);
         acc += side_dir * (pressure * a.cy_beta * beta);
-        acc -= v_dir * (pressure * drag_coefficient(a, alpha, beta, speed / SPEED_OF_SOUND));
+        acc -= v_dir * (pressure * cd);
     }
     s.g_load = (acc - gravity).dot(up) / GRAVITY;
 
@@ -401,7 +415,7 @@ type PlaneParts = (
     &'static mut SimPose,
     &'static mut Velocity,
     &'static mut Surfaces,
-    &'static mut TickTelemetry,
+    &'static mut LastCommand,
 );
 
 /// One fixed tick of piloted flight: the instructor turns the aim into
@@ -427,15 +441,11 @@ pub fn fly_tick(
     command
 }
 
-/// What the last fixed tick fed the flight model, for the flight recorder
-/// (native only; the browser build writes it for nobody).
+/// The surface command of the last fixed tick (instructor plus keyboard
+/// overrides), for the flight recorder — the one thing it cannot read back
+/// from the tick's input and state.
 #[derive(Component, Default, Clone, Copy, Debug)]
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-pub struct TickTelemetry {
-    pub input: FlightInput,
-    pub command: Surfaces,
-    pub dt: f32,
-}
+pub struct LastCommand(pub Surfaces);
 
 /// The ECS side of [`fly_tick`] for the local plane.
 pub fn step_flight(
@@ -443,20 +453,20 @@ pub fn step_flight(
     input: Res<FlightInput>,
     mut plane: Single<PlaneParts, With<LocalPlane>>,
 ) {
-    let (aircraft, state, instructor, pose, velocity, surfaces, telemetry) = &mut *plane;
+    let (aircraft, state, instructor, pose, velocity, surfaces, last_command) = &mut *plane;
 
-    let dt = time.delta_secs();
-    let command = fly_tick(state, &aircraft.airframe, instructor, &input, dt);
-    **telemetry = TickTelemetry {
-        input: *input,
-        command,
-        dt,
-    };
+    last_command.0 = fly_tick(
+        state,
+        &aircraft.airframe,
+        instructor,
+        &input,
+        time.delta_secs(),
+    );
 
     pose.previous = pose.current;
     pose.current = (state.pos, state.quat);
     velocity.0 = state.vel;
-    **surfaces = state.surfaces;
+    surfaces.set_if_neq(state.surfaces);
 }
 
 /// Deliberately different airframes for tests: the flight model and the
@@ -841,7 +851,7 @@ mod tests {
             // Trim alpha each step so lift balances gravity.
             let speed = state.speed();
             let cl = GRAVITY / (a.aero_k * density_ratio(state.pos.y) * speed * speed);
-            state.quat = Quat::from_rotation_x((cl - a.cl0) / a.cl_alpha);
+            state.quat = Quat::from_rotation_x(a.alpha_for_lift(cl));
             state.vel = Vec3::NEG_Z * speed;
             state.pos.y = 500.0;
             step(&mut state, a, &Surfaces::default(), 0.0, DT);

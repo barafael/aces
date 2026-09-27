@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bevy = "0.19"
+bevy = { version = "0.19", features = ["jpeg"] }
 aces-protocol = { path = "../aces-protocol" }
 aces-net = { path = "../aces-net" }
 serde = { version = "1", features = ["derive"] }

@@ -1,3 +1,5 @@
 /target
 dist/
 /flightlogs
+# ~85 MB of Sketchfab .glb exports, distributed separately (see PLAN.md).
+/aces-client/assets/models

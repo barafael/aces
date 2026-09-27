@@ -35,7 +35,7 @@ use serde::{Deserialize, Serialize};
 use crate::Phase;
 use crate::flight::input::{FlightInput, FreeLook, MouseAim};
 use crate::flight::instructor::{Instructor, InstructorDebug};
-use crate::flight::model::{FlightState, TickTelemetry, step_flight};
+use crate::flight::model::{FlightState, LastCommand, step_flight};
 use crate::flight::{Aircraft, AngularRates, LocalPlane, Surfaces, camera};
 
 /// Bumped whenever a record changes shape.
@@ -190,7 +190,7 @@ impl From<&FlightState> for StateRecord {
             quat: s.quat.to_array(),
             vel: s.vel.to_array(),
             omega: [s.omega.pitch, s.omega.yaw, s.omega.roll],
-            surfaces: surfaces_array(&s.surfaces),
+            surfaces: s.surfaces.to_array(),
             throttle: s.throttle,
             engine: s.engine,
             alpha: s.alpha,
@@ -213,11 +213,7 @@ impl StateRecord {
                 yaw: self.omega[1],
                 roll: self.omega[2],
             },
-            surfaces: Surfaces {
-                elevator: self.surfaces[0],
-                aileron: self.surfaces[1],
-                rudder: self.surfaces[2],
-            },
+            surfaces: Surfaces::from_array(self.surfaces),
             throttle: self.throttle,
             engine: self.engine,
             alpha: self.alpha,
@@ -227,10 +223,6 @@ impl StateRecord {
             buffet_phase: self.buffet_phase,
         }
     }
-}
-
-pub fn surfaces_array(s: &Surfaces) -> [f32; 3] {
-    [s.elevator, s.aileron, s.rudder]
 }
 
 /// The header for a log written now with the current constants.
@@ -304,23 +296,34 @@ impl Plugin for RecorderPlugin {
         .add_systems(First, count_frames)
         .add_systems(OnEnter(Phase::InGame), start_log)
         .add_systems(OnExit(Phase::InGame), stop_log)
+        // Nothing is built, formatted or written unless a log is open.
         .add_systems(
             FixedUpdate,
             (
                 record_spawn.before(step_flight),
                 record_tick.after(step_flight),
-            ),
+            )
+                .run_if(recording),
         )
         .add_systems(
             Update,
             (record_frame, mark)
                 .chain()
                 .after(camera::update_camera)
-                .run_if(in_state(Phase::InGame)),
+                .run_if(in_state(Phase::InGame).and_then(recording)),
         )
         .add_systems(Last, flush_on_exit);
     }
 }
+
+/// Run condition: a flight log is open.
+fn recording(recorder: Res<FlightRecorder>) -> bool {
+    recorder.out.is_some()
+}
+
+/// Write buffer: roughly a second of flight, so the main thread makes about
+/// one write call per second (the periodic flush) instead of a dozen.
+const WRITE_BUFFER: usize = 128 * 1024;
 
 /// The open log, if any, and the frame/tick counters.
 #[derive(Resource)]
@@ -381,7 +384,10 @@ fn start_log(mut recorder: ResMut<FlightRecorder>) {
             n += 1;
             path = dir.join(format!("flight-{}-{n}.jsonl", header.created));
         }
-        Ok((path.clone(), BufWriter::new(File::create(path)?)))
+        Ok((
+            path.clone(),
+            BufWriter::with_capacity(WRITE_BUFFER, File::create(path)?),
+        ))
     });
     match opened {
         Ok(out) => {
@@ -424,21 +430,24 @@ fn record_spawn(
     }
 }
 
+/// Runs right after `step_flight` in the same fixed tick, so the input
+/// resource and the tick length are exactly what the model flew on.
 fn record_tick(
     time: Res<Time>,
+    input: Res<FlightInput>,
     mut recorder: ResMut<FlightRecorder>,
-    plane: Single<(&FlightState, &Instructor, &TickTelemetry), With<LocalPlane>>,
+    plane: Single<(&FlightState, &Instructor, &LastCommand), With<LocalPlane>>,
 ) {
-    let (state, instructor, telemetry) = *plane;
+    let (state, instructor, command) = *plane;
     recorder.tick += 1;
     let record = Record::Tick(TickRecord {
         tick: recorder.tick,
         frame: recorder.frame,
         t: time.elapsed_secs_f64(),
-        dt: telemetry.dt,
-        input: (&telemetry.input).into(),
+        dt: time.delta_secs(),
+        input: (&*input).into(),
         instructor: instructor.debug,
-        command: surfaces_array(&telemetry.command),
+        command: command.0.to_array(),
         state: state.into(),
     });
     recorder.write(&record);

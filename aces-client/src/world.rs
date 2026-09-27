@@ -29,7 +29,16 @@ pub fn setup_world(
     // can replace this later without touching anything else.
     let sky_texture = images.add(sky_gradient_image());
     commands.spawn((
-        Mesh3d(meshes.add(Sphere::new(SKY_RADIUS).mesh().build())),
+        // Icosphere (its UVs run from +Y, which the gradient relies on), at
+        // a subdivision that suits a gradient: ~1.3k triangles, not ~20k.
+        Mesh3d(
+            meshes.add(
+                Sphere::new(SKY_RADIUS)
+                    .mesh()
+                    .ico(3)
+                    .expect("ico(3) is within the subdivision limit"),
+            ),
+        ),
         MeshMaterial3d(materials.add(StandardMaterial {
             unlit: true,
             base_color_texture: Some(sky_texture),
@@ -98,7 +107,7 @@ pub fn setup_world(
 fn sky_gradient_image() -> Image {
     const HEIGHT: usize = 256;
     let zenith = [0.20_f32, 0.42, 0.75];
-    let horizon = [0.75, 0.85, 0.92];
+    let horizon = HORIZON.to_srgba().to_f32_array_no_alpha();
     let under = [0.45, 0.55, 0.62];
 
     let mut data = Vec::with_capacity(4 * HEIGHT);

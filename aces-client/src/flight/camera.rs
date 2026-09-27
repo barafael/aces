@@ -50,9 +50,8 @@ pub fn update_camera(
 
     // Spring the orbit back behind the plane when the pilot releases V.
     if !free_look.active {
-        let decay = 1.0 - (-FREE_LOOK_RETURN * dt).exp();
-        free_look.yaw *= 1.0 - decay;
-        free_look.pitch *= 1.0 - decay;
+        free_look.yaw.smooth_nudge(&0.0, FREE_LOOK_RETURN, dt);
+        free_look.pitch.smooth_nudge(&0.0, FREE_LOOK_RETURN, dt);
     }
 
     let target = aim.rot
@@ -61,8 +60,9 @@ pub fn update_camera(
 
     // A new plane (first frame, respawn, new game): snap, don't swoop.
     let rot = match *smoothed {
-        Some((entity, rot)) if entity == plane_entity => {
-            rot.slerp(target, 1.0 - (-CAM_SMOOTHING * dt).exp())
+        Some((entity, mut rot)) if entity == plane_entity => {
+            rot.smooth_nudge(&target, CAM_SMOOTHING, dt);
+            rot
         }
         _ => target,
     };

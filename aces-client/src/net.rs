@@ -37,10 +37,13 @@ impl Plugin for ClientNetPlugin {
                     handle_socket,
                     submit_events,
                     watch_start,
-                    send_snapshots.run_if(in_state(Phase::InGame)),
-                    apply_snapshots.run_if(in_state(Phase::InGame)),
-                    interpolate_remotes.run_if(in_state(Phase::InGame)),
-                    despawn_gone_remotes.run_if(in_state(Phase::InGame)),
+                    (
+                        send_snapshots,
+                        apply_snapshots,
+                        interpolate_remotes,
+                        despawn_gone_remotes,
+                    )
+                        .run_if(in_state(Phase::InGame)),
                 ),
             );
     }
@@ -121,14 +124,14 @@ fn handle_socket(
         }
     }
 
-    let my_id_just_set = net.my_id.is_none() && socket.id().is_some();
-    if my_id_just_set {
-        net.my_id = socket.id();
+    let my_id_just_set = net.my_id().is_none() && socket.id().is_some();
+    if let Some(id) = socket.id().filter(|_| my_id_just_set) {
+        net.set_my_id(id);
     }
-    if peers_changed || my_id_just_set {
+    if peers_changed {
         net.refresh_sorted();
     }
-    if let Some(my_id) = net.my_id
+    if let Some(my_id) = net.my_id()
         && (peers_changed || my_id_just_set)
     {
         let was_host = net.is_host;
@@ -144,15 +147,16 @@ fn handle_socket(
 
     let peers = net.peers.clone();
 
-    // The host prunes roster entries whose peer has left the mesh.
-    if net.is_host && prune_departed(&mut net) {
+    // The host prunes roster entries whose peer has left the mesh (peers
+    // only leave, and hosts only change, when the peer set changes).
+    if net.is_host && (peers_changed || my_id_just_set) && prune_departed(&mut net) {
         publish_roster(&mut socket, &peers, &net);
     }
 
     // Announce ourselves to peers we have not greeted yet; a re-greet is
     // also how a rename or aircraft change propagates.
-    let me = net.my_id.map(|id| id.to_string()).unwrap_or_default();
-    if net.name.is_empty() && !me.is_empty() {
+    if net.name.is_empty() && !net.my_peer().is_empty() {
+        let me = net.my_peer();
         net.name = format!("player-{}", &me[..me.len().min(4)]);
     }
     let unacquainted: Vec<PeerId> = peers
@@ -170,6 +174,7 @@ fn handle_socket(
                 aircraft,
             },
         );
+        let me = net.my_peer().to_string();
         if net.is_host && upsert_player(&mut net, &me, name, aircraft) {
             publish_roster(&mut socket, &peers, &net);
         }
@@ -204,24 +209,9 @@ fn handle_socket(
                 }
             }
             NetMsg::Game(ev) => {
-                if !net.is_host {
-                    // Not the host: forward the submission to whoever we
-                    // currently consider the host (transient election
-                    // disagreement right after a peer connect).
-                    if let Some(host) = net.host_id()
-                        && let Some(encoded) = aces_net::enc_msg(&NetMsg::Game(ev))
-                    {
-                        let _ = socket.channel_mut(CH_RELIABLE).try_send(encoded, host);
-                    }
-                    continue;
-                }
-                // Sequence the submission and rebroadcast. The host applies
-                // its own events through the same `Sequenced` path as
-                // everyone else (loopback).
-                let seq = net.next_seq;
-                net.next_seq += 1;
-                broadcast_reliable(&mut socket, &peers, &NetMsg::Sequenced { seq, event: ev.clone() });
-                net_in.sequenced.push((seq, ev));
+                // A guest's submission. Not the host (a transient election
+                // disagreement right after a peer connect)? Pass it on.
+                route_event(&mut socket, &mut net, &mut net_in, &peers, ev);
             }
             NetMsg::Sequenced { seq, event } => {
                 // Apply-once, in canonical order.
@@ -240,12 +230,12 @@ fn handle_socket(
 /// Host: drop roster entries whose peer has left. Returns whether anything
 /// changed.
 fn prune_departed(net: &mut NetState) -> bool {
-    let me = net.my_id.map(|id| id.to_string());
     let connected: std::collections::HashSet<String> =
         net.peers.iter().map(|p| p.to_string()).collect();
+    let me = net.my_peer().to_string();
     let before = net.players.len();
     net.players
-        .retain(|p| me.as_ref() == Some(&p.peer) || connected.contains(&p.peer));
+        .retain(|p| p.peer == me || connected.contains(&p.peer));
     net.players.len() != before
 }
 
@@ -293,16 +283,37 @@ fn submit_events(
     };
     let peers = net.peers.clone();
     for ev in out.events.drain(..) {
-        if net.is_host {
-            let seq = net.next_seq;
-            net.next_seq += 1;
-            broadcast_reliable(&mut socket, &peers, &NetMsg::Sequenced { seq, event: ev.clone() });
-            net_in.sequenced.push((seq, ev));
-        } else if let Some(host) = net.host_id()
-            && let Some(encoded) = aces_net::enc_msg(&NetMsg::Game(ev))
-        {
-            let _ = socket.channel_mut(CH_RELIABLE).try_send(encoded, host);
-        }
+        route_event(&mut socket, &mut net, &mut net_in, &peers, ev);
+    }
+}
+
+/// Route one game event into the room's canonical order: the host
+/// sequences it, rebroadcasts it and loops it back to itself (so it applies
+/// its own events through the same `Sequenced` path as everyone else); a
+/// guest forwards it to whoever it currently considers the host.
+fn route_event(
+    socket: &mut MatchboxSocket,
+    net: &mut NetState,
+    net_in: &mut NetIn,
+    peers: &[PeerId],
+    ev: GameEvent,
+) {
+    if net.is_host {
+        let seq = net.next_seq;
+        net.next_seq += 1;
+        broadcast_reliable(
+            socket,
+            peers,
+            &NetMsg::Sequenced {
+                seq,
+                event: ev.clone(),
+            },
+        );
+        net_in.sequenced.push((seq, ev));
+    } else if let Some(host) = net.host_id()
+        && let Some(encoded) = aces_net::enc_msg(&NetMsg::Game(ev))
+    {
+        let _ = socket.channel_mut(CH_RELIABLE).try_send(encoded, host);
     }
 }
 
@@ -347,11 +358,7 @@ fn send_snapshots(
             pos: pos.to_array(),
             rot: quat.to_array(),
             vel: plane.1.0.to_array(),
-            surfaces: [
-                quantize_surface(plane.2.elevator),
-                quantize_surface(plane.2.aileron),
-                quantize_surface(plane.2.rudder),
-            ],
+            surfaces: plane.2.to_array().map(quantize_surface),
             hp: plane.3.hp_byte(),
         }),
     );
@@ -396,7 +403,7 @@ fn interpolate_remotes(
         if let Some(sample) = interp_pose(&remote.history, now) {
             transform.translation = sample.pos;
             transform.rotation = sample.rot;
-            *surfaces = sample.surfaces;
+            surfaces.set_if_neq(sample.surfaces);
         }
     }
 }
@@ -416,11 +423,7 @@ impl RemoteSample {
         Self {
             pos: Vec3::from(s.pos),
             rot: Quat::from_array(s.rot).normalize(),
-            surfaces: Surfaces {
-                elevator: dequantize_surface(s.surfaces[0]),
-                aileron: dequantize_surface(s.surfaces[1]),
-                rudder: dequantize_surface(s.surfaces[2]),
-            },
+            surfaces: Surfaces::from_array(s.surfaces.map(dequantize_surface)),
             hp: s.hp as f32,
         }
     }
@@ -429,10 +432,9 @@ impl RemoteSample {
         Self {
             pos: self.pos.lerp(other.pos, f),
             rot: self.rot.slerp(other.rot, f),
-            surfaces: Surfaces {
-                elevator: self.surfaces.elevator.lerp(other.surfaces.elevator, f),
-                aileron: self.surfaces.aileron.lerp(other.surfaces.aileron, f),
-                rudder: self.surfaces.rudder.lerp(other.surfaces.rudder, f),
+            surfaces: {
+                let (a, b) = (self.surfaces.to_array(), other.surfaces.to_array());
+                Surfaces::from_array(std::array::from_fn(|i| a[i].lerp(b[i], f)))
             },
             // Health is discrete state, not a pose: take the nearest side's
             // value so a death is never interpolated away.
@@ -464,16 +466,14 @@ pub fn interp_pose(history: &VecDeque<(f64, PlaneSnapshot)>, now: f64) -> Option
         return Some(RemoteSample::of(oldest));
     }
 
-    // Find the bracketing pair and interpolate.
-    let mut prev = history.front()?;
-    for next in history.iter().skip(1) {
-        if target < next.0 {
-            let f = ((target - prev.0) / (next.0 - prev.0)) as f32;
-            return Some(RemoteSample::of(&prev.1).lerp(&RemoteSample::of(&next.1), f));
-        }
-        prev = next;
-    }
-    Some(RemoteSample::of(newest))
+    // The bracketing pair: the history is sorted by time, and here
+    // t_first < target < t_last, so the first later sample has a
+    // predecessor.
+    let next = history.partition_point(|(t, _)| *t <= target);
+    let (t0, a) = &history[next - 1];
+    let (t1, b) = &history[next];
+    let f = ((target - t0) / (t1 - t0)) as f32;
+    Some(RemoteSample::of(a).lerp(&RemoteSample::of(b), f))
 }
 
 /// Despawn remote planes whose peer is no longer in the roster.

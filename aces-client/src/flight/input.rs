@@ -100,7 +100,7 @@ impl MouseAim {
     fn level(&mut self, dt: f32) {
         let forward = self.rot * Vec3::NEG_Z;
         let up = self.rot * Vec3::Y;
-        let Some(horizon_up) = (Vec3::Y - forward * forward.y).try_normalize() else {
+        let Some(horizon_up) = Vec3::Y.reject_from_normalized(forward).try_normalize() else {
             return;
         };
         let angle = forward.dot(up.cross(horizon_up)).atan2(up.dot(horizon_up));

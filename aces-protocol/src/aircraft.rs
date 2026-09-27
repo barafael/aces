@@ -151,6 +151,10 @@ pub struct Airframe {
 pub struct AircraftType {
     pub name: &'static str,
     pub airframe: Airframe,
+    /// glTF model (`.glb`), relative to the client's asset root; `None`
+    /// shows the built-in low-poly placeholder airframe. The client needs
+    /// per-model corrections (scale/orientation) — see its model fixups.
+    pub model: Option<&'static str>,
 }
 
 /// The placeholder jet everything was tuned on: a ~16 m span fighter,
@@ -207,10 +211,30 @@ pub const PLACEHOLDER_JET: Airframe = Airframe {
 };
 
 /// The selectable aircraft, indexed by [`crate::PlayerInfo::aircraft`].
-pub const AIRCRAFT: [AircraftType; 1] = [AircraftType {
-    name: "Jet (placeholder)",
-    airframe: PLACEHOLDER_JET,
-}];
+/// Every airframe is still the placeholder jet — the models arrived before
+/// their numbers did; split the airframes as each plane gets tuned.
+pub const AIRCRAFT: [AircraftType; 4] = [
+    AircraftType {
+        name: "Jet (placeholder)",
+        airframe: PLACEHOLDER_JET,
+        model: None,
+    },
+    AircraftType {
+        name: "F-15E Strike Eagle",
+        airframe: PLACEHOLDER_JET,
+        model: Some("models/f-15e_strike_eagle_-_fighter_jet_-_free.glb"),
+    },
+    AircraftType {
+        name: "F/A-141F",
+        airframe: PLACEHOLDER_JET,
+        model: Some("models/f__a-141f_fighter.glb"),
+    },
+    AircraftType {
+        name: "MiG-19",
+        airframe: PLACEHOLDER_JET,
+        model: Some("models/mikoyan-gurevich_mig-19.glb"),
+    },
+];
 
 /// Number of selectable aircraft.
 pub const AIRCRAFT_COUNT: u8 = AIRCRAFT.len() as u8;
@@ -225,8 +249,29 @@ impl Airframe {
     /// 1 g stall speed at sea level [m/s], from the lift curve's peak at the
     /// stall angle (the soft stall band adds a little on top).
     pub fn stall_speed(&self) -> f32 {
-        let cl_max = self.cl0 + self.cl_alpha * self.alpha_stall;
+        let cl_max = self.linear_lift(self.alpha_stall);
         (9.81 / (self.aero_k * cl_max)).sqrt()
+    }
+
+    /// Lift coefficient of the attached-flow (linear) lift curve at `alpha`.
+    pub fn linear_lift(&self, alpha: f32) -> f32 {
+        self.cl0 + self.cl_alpha * alpha
+    }
+
+    /// Its inverse: the angle of attack for lift coefficient `cl`.
+    pub fn alpha_for_lift(&self, cl: f32) -> f32 {
+        (cl - self.cl0) / self.cl_alpha
+    }
+
+    /// Angle of attack per unit of elevator deflection in the direction of
+    /// `sign` (pull for positive): the flight model maps elevator → AoA
+    /// with it, the instructor AoA → elevator.
+    pub fn elevator_alpha(&self, sign: f32) -> f32 {
+        if sign >= 0.0 {
+            self.elevator_alpha_up
+        } else {
+            self.elevator_alpha_down
+        }
     }
 
     /// The throttle's boost range name: `AB` (afterburner) or `WEP`.

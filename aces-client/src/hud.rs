@@ -19,14 +19,21 @@ use bevy::asset::RenderAssetUsages;
 use bevy::image::Image;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::time::common_conditions::on_timer;
+use bevy::ui::Val2;
+use core::fmt::Write as _;
+use core::time::Duration;
 
 use crate::Phase;
 use crate::flight::input::{FlightInput, MouseAim};
-use crate::flight::model::{FlightState, THROTTLE_MAX};
+use crate::flight::model::{FlightState, boost_fraction};
 use crate::flight::{Aircraft, LocalPlane, camera};
 
 /// Marker size in logical pixels.
 const MARKER_SIZE: f32 = 28.0;
+/// Flight info refresh rate [Hz]: faster than a pilot reads, slower than
+/// re-shaping the text every frame.
+const INFO_HZ: f32 = 15.0;
 /// Distance along each marker's ray where it is projected [m] — far enough
 /// that the camera's offset from the plane hardly shifts it.
 const MARKER_DISTANCE: f32 = 1500.0;
@@ -56,18 +63,22 @@ impl Plugin for HudPlugin {
             Update,
             (
                 show_hud,
-                (update_markers, update_info)
+                (
+                    update_markers,
+                    update_info.run_if(on_timer(Duration::from_secs_f32(1.0 / INFO_HZ))),
+                )
                     .after(camera::update_camera)
                     .run_if(in_state(Phase::InGame)),
             ),
         );
-        #[cfg(not(target_arch = "wasm32"))]
-        app.add_systems(
-            Update,
-            show_recording
-                .after(update_info)
-                .run_if(in_state(Phase::InGame)),
-        );
+    }
+}
+
+/// Replace a text's content only when it differs: every write re-shapes the
+/// text and re-lays out the UI.
+pub fn set_text(text: &mut Mut<Text>, value: &str) {
+    if text.0 != value {
+        value.clone_into(&mut text.0);
     }
 }
 
@@ -135,14 +146,19 @@ fn path_symbol(dx: f32, dy: f32) -> f32 {
     circle.max(wings).max(fin)
 }
 
-fn marker_node(image: Handle<Image>, color: Color) -> (Node, ImageNode, Visibility) {
+/// A marker node, placed at the top left and moved by its [`UiTransform`]
+/// (which, unlike `Node` offsets, does not re-run the layout each frame).
+fn marker_node(image: Handle<Image>, color: Color) -> (Node, UiTransform, ImageNode, Visibility) {
     (
         Node {
             position_type: PositionType::Absolute,
+            left: Val::Px(0.0),
+            top: Val::Px(0.0),
             width: Val::Px(MARKER_SIZE),
             height: Val::Px(MARKER_SIZE),
             ..default()
         },
+        UiTransform::default(),
         ImageNode {
             color,
             image,
@@ -156,7 +172,7 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>, assets: 
     let ring = images.add(marker_texture(ring));
     let cross = images.add(marker_texture(cross));
     let path = images.add(marker_texture(path_symbol));
-    let font: Handle<Font> = assets.load("fonts/FreeSansBold.ttf");
+    let font: Handle<Font> = assets.load(crate::menu::UI_FONT);
 
     commands
         .spawn((
@@ -235,7 +251,7 @@ fn update_markers(
     camera: Single<(&Camera, &Transform), (With<Camera3d>, Without<LocalPlane>)>,
     plane: Single<(&Transform, &FlightState), With<LocalPlane>>,
     aim: Res<MouseAim>,
-    mut markers: Query<(&Marker, &mut Node, &mut Visibility)>,
+    mut markers: Query<(&Marker, &mut UiTransform, &mut Visibility)>,
 ) {
     // The camera moved this frame, after transform propagation last ran:
     // project with its fresh local transform (it has no parent).
@@ -243,7 +259,7 @@ fn update_markers(
     let camera_global = GlobalTransform::from(*camera_transform);
     let (transform, state) = *plane;
 
-    for (marker, mut node, mut visibility) in &mut markers {
+    for (marker, mut ui_transform, mut visibility) in &mut markers {
         let direction = match marker {
             Marker::Aim => Some(aim.dir()),
             Marker::Nose => Some(transform.forward().into()),
@@ -257,8 +273,11 @@ fn update_markers(
             });
         match screen {
             Some(screen) => {
-                node.left = Val::Px(screen.x - MARKER_SIZE / 2.0);
-                node.top = Val::Px(screen.y - MARKER_SIZE / 2.0);
+                let corner = screen - MARKER_SIZE / 2.0;
+                let translation = Val2::px(corner.x, corner.y);
+                if ui_transform.translation != translation {
+                    ui_transform.translation = translation;
+                }
                 visibility.set_if_neq(Visibility::Inherited);
             }
             None => {
@@ -268,45 +287,47 @@ fn update_markers(
     }
 }
 
-/// Tell the pilot the flight is being recorded, and how to mark a moment.
-#[cfg(not(target_arch = "wasm32"))]
-fn show_recording(
-    recorder: Res<crate::flight::recorder::FlightRecorder>,
-    mut info: Single<&mut Text, With<FlightInfo>>,
-) {
-    if recorder.path().is_some() {
-        info.0.push_str("\nREC · M marks");
-    }
-}
-
 fn update_info(
     plane: Single<(&FlightState, &Aircraft), With<LocalPlane>>,
     input: Res<FlightInput>,
+    #[cfg(not(target_arch = "wasm32"))] recorder: Res<crate::flight::recorder::FlightRecorder>,
     mut info: Single<&mut Text, With<FlightInfo>>,
     mut stall: Single<&mut Visibility, With<StallWarning>>,
+    mut buffer: Local<String>,
 ) {
     let (s, aircraft) = *plane;
-    let throttle = if s.throttle > 1.0 + 1e-3 {
-        let boost = (s.throttle - 1.0) / (THROTTLE_MAX - 1.0);
-        format!(
-            "{} {:>3.0} %",
-            aircraft.airframe.boost_label(),
-            boost * 100.0
-        )
-    } else {
-        format!("{:>3.0} %", s.throttle * 100.0)
-    };
-    info.0 = format!(
-        "{}\nSPD {:>5.0} km/h\nALT {:>5.0} m\nTHR {throttle}\nG {:>5.1}   AoA {:>4.1}°",
+    buffer.clear();
+    let _ = write!(
+        buffer,
+        "{}\nSPD {:>5.0} km/h\nALT {:>5.0} m\nTHR ",
         aircraft.name(),
         s.speed() * 3.6,
         s.pos.y,
+    );
+    let _ = if s.throttle > 1.0 + 1e-3 {
+        write!(
+            buffer,
+            "{} {:>3.0} %",
+            aircraft.airframe.boost_label(),
+            boost_fraction(s.throttle) * 100.0
+        )
+    } else {
+        write!(buffer, "{:>3.0} %", s.throttle * 100.0)
+    };
+    let _ = write!(
+        buffer,
+        "\nG {:>5.1}   AoA {:>4.1}°",
         s.g_load,
-        s.alpha.to_degrees(),
+        s.alpha.to_degrees()
     );
     if input.limiter_off {
-        info.0.push_str("\nLIMITER OFF");
+        buffer.push_str("\nLIMITER OFF");
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    if recorder.path().is_some() {
+        buffer.push_str("\nREC · M marks");
+    }
+    set_text(&mut info, &buffer);
     stall.set_if_neq(if s.stalled {
         Visibility::Inherited
     } else {

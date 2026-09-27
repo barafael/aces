@@ -20,6 +20,7 @@ use aces_net::{
 };
 use aces_protocol::{AIRCRAFT, AIRCRAFT_COUNT, aircraft};
 
+use crate::hud::set_text;
 use crate::net::{publish_roster, upsert_player};
 use crate::{NetworkMode, Phase};
 
@@ -65,20 +66,19 @@ struct LobbyText;
 #[derive(Component)]
 struct GameHint;
 
-/// The embedded UI font (GNU FreeSans Bold, via gnils). Bevy's built-in
-/// default font is a small Fira Mono subset that lacks — – … etc.
-#[derive(Resource, Clone)]
-struct UiFont(Handle<Font>);
+/// The embedded UI font (GNU FreeSans Bold, via gnils), for menu and HUD.
+/// Bevy's built-in default font is a small Fira Mono subset that lacks — –
+/// … etc.
+pub const UI_FONT: &str = "fonts/FreeSansBold.ttf";
 
 fn spawn_ui(mut commands: Commands, assets: Res<AssetServer>) {
-    let font = UiFont(assets.load("fonts/FreeSansBold.ttf"));
+    let font: Handle<Font> = assets.load(UI_FONT);
     let text_font = TextFont {
-        font: font.0.clone().into(),
+        font: font.into(),
         font_size: FontSize::Px(26.0),
         ..default()
     };
     let text_color = TextColor(Color::srgb(0.9, 0.93, 1.0));
-    commands.insert_resource(font);
 
     commands
         .spawn(Node {
@@ -265,7 +265,7 @@ fn update_lobby(
             if net.is_host {
                 // The host's own entry refreshes on its next greet; make it
                 // immediate so the roster the host starts with is correct.
-                let me = net.my_id.map(|id| id.to_string()).unwrap_or_default();
+                let me = net.my_peer().to_string();
                 let (name, aircraft) = (net.name.clone(), net.aircraft);
                 let peers = net.peers.clone();
                 if let Some(socket) = socket.as_mut()
@@ -333,7 +333,7 @@ fn update_ui_text(
     mode: Res<NetworkMode>,
     room: Option<Res<RoomId>>,
     auto_room: Res<crate::AutoRoom>,
-    draft: ResMut<JoinDraft>,
+    draft: Res<JoinDraft>,
     mut menu: Query<&mut Text, With<MenuText>>,
     mut lobby: Query<
         (&mut Text, &mut Visibility),
@@ -351,10 +351,12 @@ fn update_ui_text(
         return;
     };
 
-    match phase.get() {
+    // Every write re-shapes text and re-lays out the UI: build the wanted
+    // state, then touch only what differs.
+    let (menu_text, lobby, hint) = match phase.get() {
         Phase::Menu => {
-            if draft.active {
-                **menu = format!(
+            let text = if draft.active {
+                format!(
                     "aces — join a room\n\nroom: {}_\n\nEnter — join\nEsc — cancel{}",
                     draft.text,
                     draft
@@ -362,17 +364,13 @@ fn update_ui_text(
                         .as_ref()
                         .map(|e| format!("\n\n{e}"))
                         .unwrap_or_default()
-                );
+                )
+            } else if let Some(room) = &auto_room.0 {
+                format!("aces\n\nF — fly solo\nH — host {room}\nJ — join {room}")
             } else {
-                let mut text =
-                    String::from("aces\n\nF — fly solo\nH — host a room\nJ — join a room");
-                if let Some(room) = &auto_room.0 {
-                    text = format!("aces\n\nF — fly solo\nH — host {room}\nJ — join {room}");
-                }
-                **menu = text;
-            }
-            *lobby_vis = Visibility::Hidden;
-            *hint_vis = Visibility::Hidden;
+                String::from("aces\n\nF — fly solo\nH — host a room\nJ — join a room")
+            };
+            (text, None, false)
         }
         Phase::Lobby => {
             let mut lines = String::from("lobby");
@@ -421,21 +419,24 @@ fn update_ui_text(
                 lines.push_str("Enter — start\n");
             }
             lines.push_str("Esc — leave");
-            **lobby_text = lines;
-            *lobby_vis = Visibility::Visible;
-            **menu = String::new();
-            *hint_vis = Visibility::Hidden;
+            (String::new(), Some(lines), false)
         }
-        Phase::InGame => {
-            **menu = String::new();
-            *lobby_vis = Visibility::Hidden;
-            *hint_vis = if *mode == NetworkMode::Net {
-                Visibility::Visible
-            } else {
-                Visibility::Hidden
-            };
-        }
+        Phase::InGame => (String::new(), None, *mode == NetworkMode::Net),
+    };
+
+    set_text(&mut menu, &menu_text);
+    if let Some(lines) = &lobby {
+        set_text(&mut lobby_text, lines);
     }
+    let shown = |visible| {
+        if visible {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        }
+    };
+    lobby_vis.set_if_neq(shown(lobby.is_some()));
+    hint_vis.set_if_neq(shown(hint));
 }
 
 /// In flight the mouse steers the aim: the cursor is hidden and locked to

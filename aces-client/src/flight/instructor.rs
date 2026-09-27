@@ -39,8 +39,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::flight::Surfaces;
 use crate::flight::model::{
-    Airframe, FlightState, GRAVITY, V_REF, control_effectiveness, density_ratio, smoothstep,
-    thrust, wrap_angle,
+    Airframe, FlightState, GRAVITY, V_REF, bank_angle, control_effectiveness, density_ratio,
+    smoothstep, thrust, wrap_angle,
 };
 
 /// Lateral error below which the rudder alone corrects it, wings level
@@ -226,8 +226,8 @@ impl Instructor {
         // the thrust's share across the path.
         let gravity = Vec3::new(0.0, -GRAVITY, 0.0);
         let across = gravity + forward * thrust(a, s.engine, sigma, speed);
-        let hold = -(across - v_dir * across.dot(v_dir));
-        let alpha_trim = (hold.dot(lift_dir) / pressure - a.cl0) / a.cl_alpha;
+        let hold = -across.reject_from_normalized(v_dir);
+        let alpha_trim = a.alpha_for_lift(hold.dot(lift_dir) / pressure);
 
         // Aim error. Its direction around the path, its size from the path;
         // then the vertical part re-measured from the nose.
@@ -266,7 +266,7 @@ impl Instructor {
 
         // ── Roll: put the needed lift above the canopy, or below it and
         // push when that keeps the wings nearer upright and it is small.
-        let bank = (-right.y).atan2(up.y);
+        let bank = bank_angle(s.quat);
         let roll_pull = need.x.atan2(need.y);
         let roll_push = wrap_angle(roll_pull - PI);
         let (bank_pull, bank_push) = (wrap_angle(bank + roll_pull), wrap_angle(bank + roll_push));
@@ -290,23 +290,17 @@ impl Instructor {
         let lift_needed = need.y;
         let alpha = if protect {
             let lift = lift_needed.clamp(a.g_limit_neg * GRAVITY, a.g_limit * GRAVITY);
-            ((lift / pressure - a.cl0) / a.cl_alpha).clamp(
+            a.alpha_for_lift(lift / pressure).clamp(
                 a.alpha_stall_neg + ALPHA_MARGIN,
                 a.alpha_stall - ALPHA_MARGIN,
             )
         } else {
             // Unprotected: ask for whatever AoA the linear lift curve says,
             // up to the elevator's full authority (well past the stall).
-            ((lift_needed / pressure - a.cl0) / a.cl_alpha)
+            a.alpha_for_lift(lift_needed / pressure)
                 .clamp(-a.elevator_alpha_down, a.elevator_alpha_up)
         };
-        let elevator = alpha
-            / (eff
-                * if alpha >= 0.0 {
-                    a.elevator_alpha_up
-                } else {
-                    a.elevator_alpha_down
-                });
+        let elevator = alpha / (eff * a.elevator_alpha(alpha));
 
         // ── Yaw ────────────────────────────────────────────────────────────
         // Precision: slip the nose onto the aim. The nose sits -β off the
@@ -360,13 +354,11 @@ fn avoid_ground(s: &FlightState, aim: Vec3) -> Vec3 {
     if danger == 0.0 {
         return aim;
     }
-    let heading = Vec3::new(s.vel.x, 0.0, s.vel.z)
+    let heading = s
+        .vel
+        .with_y(0.0)
         .try_normalize()
-        .unwrap_or_else(|| {
-            Vec3::new(aim.x, 0.0, aim.z)
-                .try_normalize()
-                .unwrap_or(Vec3::NEG_Z)
-        });
+        .unwrap_or_else(|| aim.with_y(0.0).try_normalize().unwrap_or(Vec3::NEG_Z));
     let escape = (heading + Vec3::Y * GROUND_ESCAPE.tan()).normalize();
     if aim.y >= escape.y {
         return aim;
@@ -394,9 +386,7 @@ mod tests {
     }
 
     fn bank_of(s: &FlightState) -> f32 {
-        let right = s.quat * Vec3::X;
-        let up = s.quat * Vec3::Y;
-        (-right.y).atan2(up.y).to_degrees()
+        bank_angle(s.quat).to_degrees()
     }
 
     fn fly(mut state: FlightState, aim: Vec3, seconds: f32) -> Flight {

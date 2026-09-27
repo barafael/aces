@@ -141,7 +141,11 @@ pub struct GameStart {
 #[derive(Resource, Default)]
 pub struct NetState {
     pub peers: Vec<PeerId>,
-    pub my_id: Option<PeerId>,
+    /// Set through [`NetState::set_my_id`], which keeps `my_peer` in step.
+    my_id: Option<PeerId>,
+    /// `my_id` in string form — how peers appear in rosters and events —
+    /// formatted once instead of on every comparison. Empty until known.
+    my_peer: String,
     pub is_host: bool,
     /// The name this peer goes by in the roster. Survives `leave_room`.
     pub name: String,
@@ -184,6 +188,23 @@ impl NetState {
         self.sorted_all.sort();
     }
 
+    /// This peer's id, once the socket has one.
+    pub fn my_id(&self) -> Option<PeerId> {
+        self.my_id
+    }
+
+    /// Record this peer's id.
+    pub fn set_my_id(&mut self, id: PeerId) {
+        self.my_id = Some(id);
+        self.my_peer = id.to_string();
+        self.refresh_sorted();
+    }
+
+    /// This peer's id as rosters and events carry it; empty until known.
+    pub fn my_peer(&self) -> &str {
+        &self.my_peer
+    }
+
     /// Canonical sorted list of all peers including the local player.
     pub fn sorted_all(&self) -> &[PeerId] {
         &self.sorted_all
@@ -198,19 +219,17 @@ impl NetState {
 
     /// Is `peer` (a `PeerId`'s string form) this local peer?
     pub fn is_me(&self, peer: &str) -> bool {
-        self.my_id.is_some_and(|id| id.to_string() == peer)
+        self.my_id.is_some() && self.my_peer == peer
     }
 
     /// This peer's roster entry, if present.
     pub fn me(&self) -> Option<&PlayerInfo> {
-        let id = self.my_id?.to_string();
-        self.players.iter().find(|p| p.peer == id)
+        self.players.iter().find(|p| self.is_me(&p.peer))
     }
 
     /// My slot index in the roster: the spawn point index too.
     pub fn my_index(&self) -> Option<usize> {
-        let id = self.my_id?.to_string();
-        self.players.iter().position(|p| p.peer == id)
+        self.players.iter().position(|p| self.is_me(&p.peer))
     }
 
     /// Forget everything the current room's socket established — peers, id,
@@ -455,50 +474,8 @@ pub fn new_seed() -> u64 {
     rand::random()
 }
 
-/// The room id this instance belongs to. Native: first CLI arg (a fresh
-/// generated room otherwise). Wasm: the `?room=` URL parameter — a share
-/// link —, generated into the URL if absent.
-pub fn room_id() -> String {
-    #[cfg(target_arch = "wasm32")]
-    {
-        use web_sys::wasm_bindgen::JsValue;
-        let win = web_sys::window().expect("window always available");
-        let href = win.location().href().ok().unwrap_or_default();
-
-        if let Ok(url) = web_sys::Url::new(&href)
-            && let Some(id) = url.search_params().get("room")
-            && !id.is_empty()
-        {
-            return id;
-        }
-
-        let new_id = random_room();
-
-        if let Ok(url) = web_sys::Url::new(&href) {
-            url.search_params().set("room", &new_id);
-            if let Ok(history) = win.history() {
-                let _ = history.replace_state_with_url(&JsValue::NULL, "", Some(&url.href()));
-            }
-        }
-
-        new_id
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        match std::env::args().nth(1).as_deref() {
-            Some(arg) if RoomId::parse(arg).is_ok() => arg.to_string(),
-            Some(arg) => {
-                warn!("ignoring invalid room name {arg:?}; using a generated room");
-                random_room()
-            }
-            None => random_room(),
-        }
-    }
-}
-
 /// The room the instance was *launched* for, if any: native the first CLI
-/// arg, wasm the `?room=` URL parameter. Unlike [`room_id`] this never
-/// generates a room — `None` means "the user did not name one". The menu
+/// arg, wasm the `?room=` URL parameter. It never generates a room — `None` means "the user did not name one". The menu
 /// uses it to prefill hosting/joining and to enable the hands-free
 /// auto-start flow for two-instance testing.
 pub fn arg_room() -> Option<String> {
@@ -541,34 +518,31 @@ pub fn invite_url(room: &str) -> Option<String> {
 
 // ── Broadcast helpers ───────────────────────────────────────────────────────
 
-/// Send a message to every peer on the reliable channel.
-pub fn broadcast_reliable(socket: &mut MatchboxSocket, peers: &[PeerId], msg: &NetMsg) -> bool {
+/// Send a message to every peer on `channel`, encoded once. Whether it
+/// went out (there were peers, and it encoded).
+fn broadcast(socket: &mut MatchboxSocket, channel: usize, peers: &[PeerId], msg: &NetMsg) -> bool {
     if peers.is_empty() {
         return false;
     }
     let Some(encoded) = enc_msg(msg) else {
         return false;
     };
-    let channel = socket.channel_mut(CH_RELIABLE);
+    let channel = socket.channel_mut(channel);
     for &peer in peers {
         let _ = channel.try_send(encoded.clone(), peer);
     }
     true
 }
 
+/// Send a message to every peer on the reliable channel.
+pub fn broadcast_reliable(socket: &mut MatchboxSocket, peers: &[PeerId], msg: &NetMsg) -> bool {
+    broadcast(socket, CH_RELIABLE, peers, msg)
+}
+
 /// Broadcast a message to every peer on the unreliable channel. Send failures
 /// are silently dropped — the next sample supersedes.
 pub fn broadcast_unreliable(socket: &mut MatchboxSocket, peers: &[PeerId], msg: &NetMsg) {
-    if peers.is_empty() {
-        return;
-    }
-    let Some(encoded) = enc_msg(msg) else {
-        return;
-    };
-    let channel = socket.channel_mut(CH_UNRELIABLE);
-    for &peer in peers {
-        let _ = channel.try_send(encoded.clone(), peer);
-    }
+    broadcast(socket, CH_UNRELIABLE, peers, msg);
 }
 
 #[cfg(test)]
@@ -651,7 +625,7 @@ mod tests {
         assert!(net.me().is_none());
         assert_eq!(net.my_index(), None);
 
-        net.my_id = Some(PeerId(uuid::Uuid::nil()));
+        net.set_my_id(PeerId(uuid::Uuid::nil()));
         net.players = vec![
             PlayerInfo {
                 peer: "other".into(),
@@ -659,7 +633,7 @@ mod tests {
                 aircraft: 0,
             },
             PlayerInfo {
-                peer: net.my_id.unwrap().to_string(),
+                peer: net.my_peer().to_string(),
                 name: "otter".into(),
                 aircraft: 3,
             },
@@ -704,7 +678,8 @@ mod tests {
         );
         assert!(net.start.is_none(), "the start belongs to the old room");
         assert!(net.peers.is_empty());
-        assert_eq!(net.my_id, None, "the id came from the old socket");
+        assert_eq!(net.my_id(), None, "the id came from the old socket");
+        assert_eq!(net.my_peer(), "");
         assert_eq!(net.next_seq, 0);
         assert_eq!(net.last_applied_seq, None, "or the first event looks stale");
         assert!(net.greeted.is_empty());
