@@ -396,14 +396,25 @@ fn apply_snapshots(
 /// snapshot histories.
 fn interpolate_remotes(
     time: Res<Time>,
-    mut remotes: Query<(&RemotePlane, &mut Transform, &mut Surfaces)>,
+    mut remotes: Query<(
+        &RemotePlane,
+        &mut Transform,
+        &mut Surfaces,
+        &mut crate::weapons::Health,
+    )>,
 ) {
     let now = time.elapsed_secs_f64();
-    for (remote, mut transform, mut surfaces) in &mut remotes {
+    for (remote, mut transform, mut surfaces, mut health) in &mut remotes {
         if let Some(sample) = interp_pose(&remote.history, now) {
             transform.translation = sample.pos;
             transform.rotation = sample.rot;
             surfaces.set_if_neq(sample.surfaces);
+            // The victim owns its health; its snapshots are the authority
+            // (dead while at 0, alive again after its respawn).
+            health.set_if_neq(crate::weapons::Health {
+                hp: sample.hp,
+                dead: sample.hp <= 0.0,
+            });
         }
     }
 }
@@ -505,6 +516,49 @@ mod tests {
                 hp: 100,
             },
         )
+    }
+
+    /// A remote plane's health follows its snapshots: hidden while it is
+    /// dead, flying (and targetable) again once it has respawned.
+    #[test]
+    fn remote_health_follows_snapshots_through_death_and_respawn() {
+        use crate::weapons::Health;
+        use bevy::ecs::system::RunSystemOnce;
+
+        let with_hp = |t: f64, hp: u8| {
+            let (t, mut s) = snap(t, [0.0; 3], [0.0; 3]);
+            s.hp = hp;
+            (t, s)
+        };
+        let mut world = World::new();
+        world.insert_resource(Time::<()>::default()); // now = 0
+        let plane = world
+            .spawn((
+                RemotePlane {
+                    peer: "peer".into(),
+                    history: VecDeque::from(vec![with_hp(-1.0, 0), with_hp(-0.5, 0)]),
+                },
+                Transform::default(),
+                Surfaces::default(),
+                Health::full(),
+            ))
+            .id();
+        world.run_system_once(interpolate_remotes).unwrap();
+        assert!(
+            !world.get::<Health>(plane).unwrap().alive(),
+            "still shown alive"
+        );
+
+        world
+            .get_mut::<RemotePlane>(plane)
+            .unwrap()
+            .history
+            .extend([with_hp(-0.3, 100), with_hp(-0.05, 100)]);
+        world.run_system_once(interpolate_remotes).unwrap();
+        assert!(
+            world.get::<Health>(plane).unwrap().alive(),
+            "never came back"
+        );
     }
 
     #[test]

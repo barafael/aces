@@ -71,7 +71,7 @@ pub const EXPLOSION_LIFE: f32 = 0.8;
 // ── State ───────────────────────────────────────────────────────────────────
 
 /// Health of a plane (local *and* remote; remotes' is fed from snapshots).
-#[derive(Component, Debug, Clone, Copy)]
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct Health {
     pub hp: f32,
     pub dead: bool,
@@ -611,7 +611,7 @@ fn apply_events(
     net: Res<NetState>,
     mut loadout: ResMut<Loadout>,
     mut plane: Single<(&mut FlightState, &mut Health, &mut Visibility), With<LocalPlane>>,
-    mut remotes: Query<(&RemotePlane, &Transform, &mut Health), Without<LocalPlane>>,
+    remotes: Query<(&RemotePlane, &Transform), Without<LocalPlane>>,
 ) {
     let me = net.my_peer();
     for (_, event) in net_in.sequenced.drain(..) {
@@ -668,11 +668,12 @@ fn apply_events(
                 if victim == me {
                     continue; // my own death was handled in the Damage arm
                 }
-                for (remote, transform, mut health) in &mut remotes {
+                // The victim's snapshots carry its health (they hide the
+                // plane, and bring it back once it respawns); the kill
+                // itself is the explosion.
+                for (remote, transform) in &remotes {
                     if remote.peer == victim {
                         spawn_explosion(&mut commands, &assets, transform.translation, 8.0);
-                        health.hp = 0.0;
-                        health.dead = true;
                     }
                 }
                 if shooter == me {
