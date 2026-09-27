@@ -51,7 +51,7 @@ use std::collections::VecDeque;
 
 use self::input::{FlightInput, FreeLook, MouseAim};
 use self::instructor::Instructor;
-use self::model::FlightState;
+pub use self::model::FlightState;
 
 pub struct FlightPlugin;
 
@@ -268,6 +268,7 @@ fn spawn_local(
             LocalPlane,
             aircraft,
             state,
+            crate::weapons::Health::full(),
             Instructor::default(),
             SimPose::new(pos.into(), quat),
             Velocity(state.vel),
@@ -319,6 +320,7 @@ fn spawn_remote(
                 peer: peer.to_string(),
                 history: VecDeque::new(),
             },
+            crate::weapons::Health::full(),
             aircraft,
             Surfaces::default(),
             Transform::from_translation(pos.into()).with_rotation(quat),

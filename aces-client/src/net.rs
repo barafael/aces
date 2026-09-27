@@ -15,7 +15,7 @@
 use bevy::prelude::*;
 
 use aces_net::{
-    CH_RELIABLE, GameStart, MatchboxSocket, NetMsg, NetState, PeerId, PeerState,
+    CH_RELIABLE, GameEvent, GameStart, MatchboxSocket, NetMsg, NetState, PeerId, PeerState,
     broadcast_reliable, broadcast_unreliable, decode,
 };
 use aces_protocol::{PlaneSnapshot, SNAPSHOT_HZ, dequantize_surface, quantize_surface};
@@ -29,11 +29,13 @@ pub struct ClientNetPlugin;
 impl Plugin for ClientNetPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<NetIn>()
+            .init_resource::<NetOut>()
             .init_resource::<SnapshotPulse>()
             .add_systems(
                 Update,
                 (
                     handle_socket,
+                    submit_events,
                     watch_start,
                     send_snapshots.run_if(in_state(Phase::InGame)),
                     apply_snapshots.run_if(in_state(Phase::InGame)),
@@ -49,6 +51,18 @@ impl Plugin for ClientNetPlugin {
 pub struct NetIn {
     /// Snapshots received this frame: (sender peer, snapshot).
     pub snapshots: Vec<(String, PlaneSnapshot)>,
+    /// Host-sequenced events in canonical order, applied once by
+    /// `weapons::apply_events`. Includes the host's own submissions
+    /// (loopback), so every peer applies through one path.
+    pub sequenced: Vec<(u32, GameEvent)>,
+}
+
+/// Frame-scoped staging for outgoing game events. Systems push claims
+/// (hits, launches) here; `submit_events` sends them through the host's
+/// canonical sequencing.
+#[derive(Resource, Default)]
+pub struct NetOut {
+    pub events: Vec<GameEvent>,
 }
 
 /// Snapshot broadcast pacing and the sender's tick counter.
@@ -202,17 +216,18 @@ fn handle_socket(
                     continue;
                 }
                 // Sequence the submission and rebroadcast. The host applies
-                // its own events through the same `Sequenced` path once the
-                // event set is non-empty (milestone 4 adds the loopback).
+                // its own events through the same `Sequenced` path as
+                // everyone else (loopback).
                 let seq = net.next_seq;
                 net.next_seq += 1;
-                broadcast_reliable(&mut socket, &peers, &NetMsg::Sequenced { seq, event: ev });
+                broadcast_reliable(&mut socket, &peers, &NetMsg::Sequenced { seq, event: ev.clone() });
+                net_in.sequenced.push((seq, ev));
             }
-            NetMsg::Sequenced { seq, event: _ } => {
-                // Apply-once, in canonical order. No event types exist yet;
-                // milestone 4 stages and applies them here.
+            NetMsg::Sequenced { seq, event } => {
+                // Apply-once, in canonical order.
                 if net.last_applied_seq.is_none_or(|last| seq > last) {
                     net.last_applied_seq = Some(seq);
+                    net_in.sequenced.push((seq, event));
                 }
             }
             NetMsg::Snapshot(s) => {
@@ -258,6 +273,39 @@ pub fn publish_roster(socket: &mut MatchboxSocket, peers: &[PeerId], net: &NetSt
     broadcast_reliable(socket, peers, &NetMsg::Roster(net.players.clone()));
 }
 
+/// Drain the game's outgoing event queue through the host's canonical
+/// sequencing (host: sequence + broadcast + loopback; guest: forward to the
+/// host, who sequences it back to everyone).
+fn submit_events(
+    socket: Option<ResMut<MatchboxSocket>>,
+    mut net: ResMut<NetState>,
+    mut net_in: ResMut<NetIn>,
+    mut out: ResMut<NetOut>,
+    mode: Res<NetworkMode>,
+) {
+    if out.events.is_empty() || *mode == NetworkMode::Solo {
+        out.events.clear();
+        return;
+    }
+    let Some(mut socket) = socket else {
+        out.events.clear();
+        return;
+    };
+    let peers = net.peers.clone();
+    for ev in out.events.drain(..) {
+        if net.is_host {
+            let seq = net.next_seq;
+            net.next_seq += 1;
+            broadcast_reliable(&mut socket, &peers, &NetMsg::Sequenced { seq, event: ev.clone() });
+            net_in.sequenced.push((seq, ev));
+        } else if let Some(host) = net.host_id()
+            && let Some(encoded) = aces_net::enc_msg(&NetMsg::Game(ev))
+        {
+            let _ = socket.channel_mut(CH_RELIABLE).try_send(encoded, host);
+        }
+    }
+}
+
 /// Apply the host's `Start`: move from the lobby into the game.
 fn watch_start(net: Res<NetState>, state: Res<State<Phase>>, mut next: ResMut<NextState<Phase>>) {
     if net.start.is_some() && state.get() == &Phase::Lobby {
@@ -274,7 +322,7 @@ fn send_snapshots(
     mut pulse: ResMut<SnapshotPulse>,
     socket: Option<ResMut<MatchboxSocket>>,
     net: Res<NetState>,
-    plane: Single<(&SimPose, &Velocity, &Surfaces), With<LocalPlane>>,
+    plane: Single<(&SimPose, &Velocity, &Surfaces, &crate::weapons::Health), With<LocalPlane>>,
 ) {
     pulse.acc += time.delta_secs();
     if pulse.acc < 1.0 / SNAPSHOT_HZ {
@@ -304,6 +352,7 @@ fn send_snapshots(
                 quantize_surface(plane.2.aileron),
                 quantize_surface(plane.2.rudder),
             ],
+            hp: plane.3.hp_byte(),
         }),
     );
 }
@@ -358,6 +407,8 @@ pub struct RemoteSample {
     pub pos: Vec3,
     pub rot: Quat,
     pub surfaces: Surfaces,
+    /// The sender's reported health (0 while dead).
+    pub hp: f32,
 }
 
 impl RemoteSample {
@@ -370,6 +421,7 @@ impl RemoteSample {
                 aileron: dequantize_surface(s.surfaces[1]),
                 rudder: dequantize_surface(s.surfaces[2]),
             },
+            hp: s.hp as f32,
         }
     }
 
@@ -382,6 +434,9 @@ impl RemoteSample {
                 aileron: self.surfaces.aileron.lerp(other.surfaces.aileron, f),
                 rudder: self.surfaces.rudder.lerp(other.surfaces.rudder, f),
             },
+            // Health is discrete state, not a pose: take the nearest side's
+            // value so a death is never interpolated away.
+            hp: if f < 0.5 { self.hp } else { other.hp },
         }
     }
 }
@@ -447,6 +502,7 @@ mod tests {
                 rot: [0.0, 0.0, 0.0, 1.0],
                 vel,
                 surfaces: [0, 64, -127],
+                hp: 100,
             },
         )
     }

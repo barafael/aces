@@ -7,6 +7,7 @@ mod flight;
 mod hud;
 mod menu;
 mod net;
+mod weapons;
 mod world;
 
 use bevy::asset::AssetMetaCheck;
@@ -107,6 +108,7 @@ fn main() {
             net::ClientNetPlugin,
             menu::MenuPlugin,
             hud::HudPlugin,
+            weapons::WeaponsPlugin,
         ))
         .run();
 }

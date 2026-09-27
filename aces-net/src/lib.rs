@@ -38,11 +38,46 @@ pub use matchbox_socket::{ChannelConfig, PeerId, PeerState};
 
 // ── Game events (the only things that mutate a running game) ────────────────
 
-/// Semantic in-game events, host-sequenced. Empty until milestone 4 (guns,
-/// missile launches, damage claims); the sequencing plumbing exists so
-/// variants can be added without reshaping the wire format.
+/// What caused a hit.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DamageCause {
+    Gun,
+    Missile,
+}
+
+/// Semantic in-game events, host-sequenced. Applied only in `Sequenced`
+/// form, so every peer sees one canonical ordered stream.
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub enum GameEvent {}
+pub enum GameEvent {
+    /// A missile launch: every peer simulates it locally from this state
+    /// (short-lived, so the simulations only need to look alike — hit
+    /// authority stays with the shooter, who claims `Damage`).
+    MissileLaunched {
+        shooter: String,
+        /// Per-shooter launch counter, to tell consecutive missiles apart.
+        missile: u8,
+        /// 0 = IR heat-seeker (radar arrives in milestone 5).
+        kind: u8,
+        pos: [f32; 3],
+        /// Orientation (x, y, z, w).
+        quat: [f32; 4],
+        /// Launch speed along the nose [m/s].
+        speed: f32,
+        /// The locked target's peer id, if any.
+        target: Option<String>,
+    },
+    /// The shooter claims a hit on `victim`; the victim applies it to its
+    /// own HP (which it broadcasts in its snapshots).
+    Damage {
+        shooter: String,
+        victim: String,
+        amount: f32,
+        cause: DamageCause,
+    },
+    /// The victim confirms it died (its HP hit zero). Everyone plays the
+    /// explosion, hides the plane, and credits the shooter.
+    Killed { victim: String, shooter: String },
+}
 
 // ── Wire protocol ───────────────────────────────────────────────────────────
 
@@ -558,6 +593,26 @@ mod tests {
             rot: [0.0, 0.0, 0.0, 1.0],
             vel: [0.0, 0.0, -150.0],
             surfaces: [12, -127, 64],
+            hp: 87,
+        });
+        let launched = NetMsg::Game(GameEvent::MissileLaunched {
+            shooter: "peer-a".into(),
+            missile: 3,
+            kind: 0,
+            pos: [1.0, 2.0, 3.0],
+            quat: [0.0, 0.0, 0.0, 1.0],
+            speed: 250.0,
+            target: Some("peer-b".into()),
+        });
+        let damage = NetMsg::Game(GameEvent::Damage {
+            shooter: "peer-a".into(),
+            victim: "peer-b".into(),
+            amount: 60.0,
+            cause: DamageCause::Missile,
+        });
+        let killed = NetMsg::Game(GameEvent::Killed {
+            victim: "peer-b".into(),
+            shooter: "peer-a".into(),
         });
         for msg in [
             NetMsg::Hello {
@@ -567,6 +622,9 @@ mod tests {
             NetMsg::Roster(players),
             start,
             snapshot,
+            launched,
+            damage,
+            killed,
         ] {
             let bytes = enc_msg(&msg).expect("encodes");
             let back = decode(&bytes).expect("decodes");

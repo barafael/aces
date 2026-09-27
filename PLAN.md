@@ -209,6 +209,11 @@ camera) · `weapons` (gun, missiles, lock, countermeasures, damage) · `net`
   (debug) or `trunk build --release` (42 MB wasm) when memory is tight.
 - Milestone 3 verified with two live instances: host election + demotion,
   single `Start` with one seed, snapshot flow in both directions.
+- `ACES_TEST_FIRE=1` enables a hands-free auto-dogfight (auto-aim, lock,
+  fire) for two-instance end-to-end combat verification.
+- Milestone 4 verified live: mutual missile kills across two instances —
+  damage applied by the victim (100 → 40 → overkill), `Killed` confirmed,
+  respawn on the next ring slot, HP riding the plane snapshots.
 - Native + browser (wasm via trunk, share links with `?room=`).
 - Semi-realistic flight model; cone-based arcade radar/IR.
 - 3-crate workspace like gnils; bevy 0.19 to match gnils.

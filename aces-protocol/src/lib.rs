@@ -47,6 +47,8 @@ pub struct PlaneSnapshot {
     /// Control-surface positions (elevator, aileron, rudder), quantized
     /// from [-1, 1] by [`quantize_surface`], so remote airframes animate.
     pub surfaces: [i8; 3],
+    /// The sender's health, quantized from 0..=100 to a byte. 0 while dead.
+    pub hp: u8,
 }
 
 /// Pack a control-surface position in [-1, 1] into a byte.
