@@ -114,7 +114,7 @@ fn spawn_ui(mut commands: Commands, assets: Res<AssetServer>) {
                         Text::new("Esc — leave"),
                         TextFont {
                             font_size: FontSize::Px(22.0),
-                            ..default()
+                            ..text_font.clone()
                         },
                         TextColor(Color::srgba(0.9, 0.93, 1.0, 0.7)),
                         Visibility::Hidden,
