@@ -137,9 +137,10 @@ small offsets without rocking, 90° turn, G/AoA protection, stall recovery,
 tail slide) on each. Flight logs record the airframe at spawn; `replay`
 re-flies with the aircraft's current definition and lists what changed
 (`--recorded-airframe` flies the logged one). The three real models
-(F-15E, F/A-141F, MiG-19) live in `aces-client/assets/models`, which is
-kept out of git (~85 MB of Sketchfab exports; copy the `.glb` files in by
-hand). An aircraft whose model is missing flies the placeholder airframe.
+(F-15E, F/A-141F, MiG-19) live in `aces-client/assets/models`, stored with
+Git LFS (`*.glb`, ~85 MB of Sketchfab exports — install git-lfs before
+cloning, or run `git lfs pull` after). An aircraft whose model is missing
+flies the placeholder airframe.
 Third-party models are credited per their licenses (two CC BY-NC-SA 4.0 —
 non-commercial —, one CC BY 4.0): each `AIRCRAFT` entry carries its
 `Credit`, shown on the main menu's credits screen (`K`) and listed in
