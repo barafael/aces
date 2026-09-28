@@ -55,6 +55,12 @@ struct FlightInfo;
 #[derive(Component)]
 struct StallWarning;
 
+#[derive(Component)]
+struct WeaponsInfo;
+
+#[derive(Component)]
+struct ThreatWarning;
+
 pub struct HudPlugin;
 
 impl Plugin for HudPlugin {
@@ -66,6 +72,7 @@ impl Plugin for HudPlugin {
                 (
                     update_markers,
                     update_info.run_if(on_timer(Duration::from_secs_f32(1.0 / INFO_HZ))),
+                    update_weapons_hud,
                 )
                     .after(camera::update_camera)
                     .run_if(in_state(Phase::InGame)),
@@ -226,7 +233,7 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>, assets: 
                     StallWarning,
                     Text::new("STALL"),
                     TextFont {
-                        font: font.into(),
+                        font: font.clone().into(),
                         font_size: FontSize::Px(22.0),
                         ..default()
                     },
@@ -234,6 +241,49 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>, assets: 
                     Visibility::Hidden,
                 ));
             });
+
+            // Weapons & countermeasures, top right.
+            hud.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    right: Val::Px(16.0),
+                    top: Val::Px(12.0),
+                    padding: UiRect::axes(Val::Px(12.0), Val::Px(8.0)),
+                    border_radius: BorderRadius::all(Val::Px(6.0)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.02, 0.04, 0.08, 0.45)),
+            ))
+            .with_children(|panel| {
+                panel.spawn((
+                    WeaponsInfo,
+                    Text::default(),
+                    TextFont {
+                        font: font.clone().into(),
+                        font_size: FontSize::Px(18.0),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.85, 0.92, 1.0)),
+                ));
+            });
+
+            // RWR threat line, top center.
+            hud.spawn((
+                ThreatWarning,
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: Val::Px(12.0),
+                    ..default()
+                },
+                Text::default(),
+                TextFont {
+                    font: font.into(),
+                    font_size: FontSize::Px(24.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(1.0, 0.25, 0.15)),
+                Visibility::Hidden,
+            ));
         });
 }
 
@@ -333,4 +383,79 @@ fn update_info(
     } else {
         Visibility::Hidden
     });
+}
+
+/// Weapon selection, stores, lock status and the RWR picture.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn update_weapons_hud(
+    time: Res<Time>,
+    slot: Res<crate::weapons::WeaponSlot>,
+    loadout: Res<crate::weapons::Loadout>,
+    countermeasures: Res<crate::weapons::Countermeasures>,
+    ir: Res<crate::weapons::IrLock>,
+    radar: Res<crate::weapons::RadarLock>,
+    rwr: Res<crate::weapons::Rwr>,
+    mut weapons: Single<&mut Text, With<WeaponsInfo>>,
+    mut threat: Single<
+        (&mut Text, &mut Visibility),
+        (With<ThreatWarning>, Without<WeaponsInfo>),
+    >,
+    mut buffer: Local<String>,
+) {
+    let slot_label = match *slot {
+        crate::weapons::WeaponSlot::Gun => "GUN",
+        crate::weapons::WeaponSlot::IrMissile => "IR",
+        crate::weapons::WeaponSlot::RadarMissile => "RADAR",
+    };
+    let lock_label = |progress: f32, name: &str| {
+        if progress >= 1.0 {
+            format!("{name} LOCKED")
+        } else if progress > 0.0 {
+            format!("{name} {:>3.0}%", progress * 100.0)
+        } else {
+            format!("{name} —")
+        }
+    };
+    buffer.clear();
+    let _ = write!(
+        buffer,
+        "[{slot_label}]  SPACE gun\nIR {}  RADAR {}\nFLARES {}  CHAFF {}\n{}  {}",
+        loadout.ir_missiles,
+        loadout.radar_missiles,
+        countermeasures.flares,
+        countermeasures.chaff,
+        lock_label(ir.progress, "IR"),
+        lock_label(radar.progress, "RDR"),
+    );
+    set_text(&mut weapons, &buffer);
+
+    // RWR: newest threat wins; flash while active.
+    let now = time.elapsed_secs_f64();
+    let missile = rwr
+        .missile
+        .filter(|(until, _)| now <= *until)
+        .map(|(_, kind)| match kind {
+            crate::weapons::MissileKind::Ir => "MISSILE — FLARES (F)",
+            crate::weapons::MissileKind::Radar => "MISSILE — CHAFF (C)",
+        });
+    let locked = rwr
+        .radar_locked_until
+        .filter(|until| now <= *until)
+        .map(|_| "RADAR LOCK — CHAFF (C)");
+    let threat_text = missile.or(locked);
+    match threat_text {
+        Some(text) => {
+            set_text(&mut threat.0, text);
+            let blink = ((now * 3.0) as u64).is_multiple_of(2);
+            *threat.1 = if blink {
+                Visibility::Visible
+            } else {
+                Visibility::Hidden
+            };
+        }
+        None => {
+            set_text(&mut threat.0, "");
+            *threat.1 = Visibility::Hidden;
+        }
+    }
 }

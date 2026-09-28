@@ -45,6 +45,27 @@ pub enum DamageCause {
     Missile,
 }
 
+/// Countermeasure type: what breaks what.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CmKind {
+    /// Distract heat-seekers.
+    Flares,
+    /// Break radar guidance.
+    Chaff,
+}
+
+/// Unreliable-channel, fire-and-forget effects (PLAN.md "Ephemeral").
+/// Never authoritative; the newest one supersedes.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum Ephemeral {
+    /// Someone deployed countermeasures: receivers play the visual, and the
+    /// missile owner uses it to distract/break guidance.
+    Countermeasures { peer: String, kind: CmKind, pos: [f32; 3] },
+    /// A radar lock is being held on `target` (repeats while held); the
+    /// target's RWR announces it.
+    RadarLocking { target: String },
+}
+
 /// Semantic in-game events, host-sequenced. Applied only in `Sequenced`
 /// form, so every peer sees one canonical ordered stream.
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -104,6 +125,8 @@ pub enum NetMsg {
     Sequenced { seq: u32, event: GameEvent },
     /// Any -> all, unreliable: the sender's own plane state.
     Snapshot(PlaneSnapshot),
+    /// Any -> all, unreliable: fire-and-forget effects.
+    Ephemeral(Ephemeral),
 }
 
 /// Encode a `NetMsg` for the wire. Returns `None` if encoding fails or would
@@ -588,6 +611,14 @@ mod tests {
             victim: "peer-b".into(),
             shooter: "peer-a".into(),
         });
+        let cm = NetMsg::Ephemeral(Ephemeral::Countermeasures {
+            peer: "peer-b".into(),
+            kind: CmKind::Flares,
+            pos: [1.0, 2.0, 3.0],
+        });
+        let locking = NetMsg::Ephemeral(Ephemeral::RadarLocking {
+            target: "peer-b".into(),
+        });
         for msg in [
             NetMsg::Hello {
                 name: "otter".into(),
@@ -599,6 +630,8 @@ mod tests {
             launched,
             damage,
             killed,
+            cm,
+            locking,
         ] {
             let bytes = enc_msg(&msg).expect("encodes");
             let back = decode(&bytes).expect("decodes");

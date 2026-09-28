@@ -226,6 +226,15 @@ camera) · `weapons` (gun, missiles, lock, countermeasures, damage) · `net`
 - Milestone 4 verified live: mutual missile kills across two instances —
   damage applied by the victim (100 → 40 → overkill), `Killed` confirmed,
   respawn on the next ring slot, HP riding the plane snapshots.
+- Missile hits are claimed only by the owner's simulation (M4 accidentally
+  let the victim's sim claim); the shooter spawns its own missiles and
+  everyone else spawns them from the sequenced event.
+- Milestone 5 verified live: chaff broke radar guidance and flares
+  captured seekers across two instances — a perfectly-timed pop defeats a
+  missile, stores (12 + 12, regen 5 s) make it a resource game.
+- The auto-dogfight flies with energy discipline: below 130 km/h… m/s it
+  flies level to regain speed (a max-G pursuit mushes into a stall and
+  never merges — observed in the flight logs).
 - Native + browser (wasm via trunk, share links with `?room=`).
 - Semi-realistic flight model; cone-based arcade radar/IR.
 - 3-crate workspace like gnils; bevy 0.19 to match gnils.

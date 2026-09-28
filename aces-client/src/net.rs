@@ -15,8 +15,8 @@
 use bevy::prelude::*;
 
 use aces_net::{
-    CH_RELIABLE, GameEvent, GameStart, MatchboxSocket, NetMsg, NetState, PeerId, PeerState,
-    broadcast_reliable, broadcast_unreliable, decode,
+    CH_RELIABLE, CH_UNRELIABLE, Ephemeral, GameEvent, GameStart, MatchboxSocket, NetMsg, NetState,
+    PeerId, PeerState, broadcast_reliable, broadcast_unreliable, decode,
 };
 use aces_protocol::{PlaneSnapshot, SNAPSHOT_HZ, dequantize_surface, quantize_surface};
 use std::collections::VecDeque;
@@ -30,12 +30,14 @@ impl Plugin for ClientNetPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<NetIn>()
             .init_resource::<NetOut>()
+            .init_resource::<NetFxOut>()
             .init_resource::<SnapshotPulse>()
             .add_systems(
                 Update,
                 (
                     handle_socket,
                     submit_events,
+                    broadcast_fx,
                     watch_start,
                     drop_input_outside_game
                         .after(handle_socket)
@@ -61,6 +63,8 @@ pub struct NetIn {
     /// `weapons::apply_events`. Includes the host's own submissions
     /// (loopback), so every peer applies through one path.
     pub sequenced: Vec<(u32, GameEvent)>,
+    /// Fire-and-forget effects received this frame: (sender peer, effect).
+    pub ephemeral: Vec<(String, Ephemeral)>,
 }
 
 /// Only the game consumes [`NetIn`]: outside it (a late joiner waiting in
@@ -79,6 +83,13 @@ fn drop_input_outside_game(mut net_in: ResMut<NetIn>) {
 #[derive(Resource, Default)]
 pub struct NetOut {
     pub events: Vec<GameEvent>,
+}
+
+/// Frame-scoped staging for outgoing ephemeral effects (countermeasure
+/// pops, radar-lock announcements) — unreliable, fire-and-forget.
+#[derive(Resource, Default)]
+pub struct NetFxOut {
+    pub effects: Vec<Ephemeral>,
 }
 
 /// Snapshot broadcast pacing and the sender's tick counter.
@@ -234,7 +245,10 @@ fn handle_socket(
                 }
             }
             NetMsg::Snapshot(s) => {
-                net_in.snapshots.push((peer_str, s));
+                net_in.snapshots.push((peer_str.clone(), s));
+            }
+            NetMsg::Ephemeral(e) => {
+                net_in.ephemeral.push((peer_str.clone(), e));
             }
         }
     }
@@ -328,6 +342,29 @@ fn route_event(
     {
         let _ = socket.channel_mut(CH_RELIABLE).try_send(encoded, host);
     }
+}
+
+/// Drain the game's ephemeral effects onto the unreliable channel. Send
+/// failures are silently dropped — the next sample supersedes.
+fn broadcast_fx(
+    socket: Option<ResMut<MatchboxSocket>>,
+    net: Res<NetState>,
+    mut out: ResMut<NetFxOut>,
+    mode: Res<NetworkMode>,
+) {
+    if out.effects.is_empty() || *mode == NetworkMode::Solo {
+        out.effects.clear();
+        return;
+    }
+    let Some(mut socket) = socket else {
+        out.effects.clear();
+        return;
+    };
+    let peers = net.peers.clone();
+    for effect in out.effects.drain(..) {
+        broadcast_unreliable(&mut socket, &peers, &NetMsg::Ephemeral(effect));
+    }
+    let _ = CH_UNRELIABLE; // channel choice lives in broadcast_unreliable
 }
 
 /// Apply the host's `Start`: move from the lobby into the game.
@@ -440,6 +477,8 @@ pub struct RemoteSample {
     pub surfaces: Surfaces,
     /// The sender's reported health (0 while dead).
     pub hp: f32,
+    /// The sender's velocity [m/s] (lead pursuit, extrapological effects).
+    pub vel: Vec3,
 }
 
 impl RemoteSample {
@@ -449,6 +488,7 @@ impl RemoteSample {
             rot: Quat::from_array(s.rot).normalize(),
             surfaces: Surfaces::from_array(s.surfaces.map(dequantize_surface)),
             hp: s.hp as f32,
+            vel: Vec3::from(s.vel),
         }
     }
 
@@ -463,6 +503,7 @@ impl RemoteSample {
             // Health is discrete state, not a pose: take the nearest side's
             // value so a death is never interpolated away.
             hp: if f < 0.5 { self.hp } else { other.hp },
+            vel: self.vel.lerp(other.vel, f),
         }
     }
 }

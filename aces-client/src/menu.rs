@@ -67,6 +67,12 @@ struct JoinDraft {
 #[derive(Component)]
 struct MenuText;
 
+/// The rounded rectangle behind the menu/lobby texts; hidden while flying
+/// (its children's text content is blanked by phase, but the background
+/// itself would otherwise stay on screen).
+#[derive(Component)]
+struct MenuPanel;
+
 #[derive(Component)]
 struct LobbyText;
 
@@ -100,6 +106,7 @@ fn spawn_ui(mut commands: Commands, assets: Res<AssetServer>) {
         .with_children(|parent| {
             parent
                 .spawn((
+                    MenuPanel,
                     Node {
                         padding: UiRect::all(px(28.0)),
                         border_radius: BorderRadius::all(px(10.0)),
