@@ -4,8 +4,9 @@
 //! The lobby conversation lives here too, adapted from gnils: peers greet
 //! with `Hello`, the host is the single roster authority (`Roster`
 //! broadcasts) and starts the game with `Start`. In-game, semantic events
-//! flow guest → host → host-sequenced `Sequenced` rebroadcasts (the event
-//! set is still empty until milestone 4, but the sequencing plumbing runs).
+//! (launches, damage, kills) flow guest → host → host-sequenced
+//! `Sequenced` rebroadcasts; unsequenced [`Ephemeral`] effects go straight
+//! peer to peer (`broadcast_fx`).
 //!
 //! What is new versus gnils is the continuous-sim part: every peer
 //! broadcasts its own plane's [`PlaneSnapshot`] on the unreliable channel
@@ -68,12 +69,14 @@ pub struct NetIn {
 }
 
 /// Only the game consumes [`NetIn`]: outside it (a late joiner waiting in
-/// the lobby while the room flies) snapshots and events would pile up
-/// unbounded and be applied stale on entering the next game.
+/// the lobby while the room flies) snapshots, events and effects would pile
+/// up unbounded and be applied stale on entering the next game.
 fn drop_input_outside_game(mut net_in: ResMut<NetIn>) {
-    if !net_in.snapshots.is_empty() || !net_in.sequenced.is_empty() {
+    if !net_in.snapshots.is_empty() || !net_in.sequenced.is_empty() || !net_in.ephemeral.is_empty()
+    {
         net_in.snapshots.clear();
         net_in.sequenced.clear();
+        net_in.ephemeral.clear();
     }
 }
 
@@ -86,7 +89,7 @@ pub struct NetOut {
 }
 
 /// Frame-scoped staging for outgoing ephemeral effects (countermeasure
-/// pops, radar-lock announcements) — unreliable, fire-and-forget.
+/// pops, radar-lock announcements): peer to peer, unsequenced.
 #[derive(Resource, Default)]
 pub struct NetFxOut {
     pub effects: Vec<Ephemeral>,
@@ -207,7 +210,7 @@ fn handle_socket(
     }
 
     let reliable = socket.channel_mut(CH_RELIABLE).receive();
-    let unreliable = socket.channel_mut(aces_net::CH_UNRELIABLE).receive();
+    let unreliable = socket.channel_mut(CH_UNRELIABLE).receive();
 
     for (peer, raw) in reliable.into_iter().chain(unreliable) {
         let Some(msg) = decode(&raw) else {
@@ -245,10 +248,10 @@ fn handle_socket(
                 }
             }
             NetMsg::Snapshot(s) => {
-                net_in.snapshots.push((peer_str.clone(), s));
+                net_in.snapshots.push((peer_str, s));
             }
             NetMsg::Ephemeral(e) => {
-                net_in.ephemeral.push((peer_str.clone(), e));
+                net_in.ephemeral.push((peer_str, e));
             }
         }
     }
@@ -344,8 +347,8 @@ fn route_event(
     }
 }
 
-/// Drain the game's ephemeral effects onto the unreliable channel. Send
-/// failures are silently dropped — the next sample supersedes.
+/// Drain the game's ephemeral effects to every peer, each on the channel
+/// it needs ([`Ephemeral::reliable`]).
 fn broadcast_fx(
     socket: Option<ResMut<MatchboxSocket>>,
     net: Res<NetState>,
@@ -360,11 +363,15 @@ fn broadcast_fx(
         out.effects.clear();
         return;
     };
-    let peers = net.peers.clone();
     for effect in out.effects.drain(..) {
-        broadcast_unreliable(&mut socket, &peers, &NetMsg::Ephemeral(effect));
+        let reliable = effect.reliable();
+        let msg = NetMsg::Ephemeral(effect);
+        if reliable {
+            broadcast_reliable(&mut socket, &net.peers, &msg);
+        } else {
+            broadcast_unreliable(&mut socket, &net.peers, &msg);
+        }
     }
-    let _ = CH_UNRELIABLE; // channel choice lives in broadcast_unreliable
 }
 
 /// Apply the host's `Start`: move from the lobby into the game.
@@ -477,8 +484,6 @@ pub struct RemoteSample {
     pub surfaces: Surfaces,
     /// The sender's reported health (0 while dead).
     pub hp: f32,
-    /// The sender's velocity [m/s] (lead pursuit, extrapological effects).
-    pub vel: Vec3,
 }
 
 impl RemoteSample {
@@ -488,7 +493,6 @@ impl RemoteSample {
             rot: Quat::from_array(s.rot).normalize(),
             surfaces: Surfaces::from_array(s.surfaces.map(dequantize_surface)),
             hp: s.hp as f32,
-            vel: Vec3::from(s.vel),
         }
     }
 
@@ -503,7 +507,6 @@ impl RemoteSample {
             // Health is discrete state, not a pose: take the nearest side's
             // value so a death is never interpolated away.
             hp: if f < 0.5 { self.hp } else { other.hp },
-            vel: self.vel.lerp(other.vel, f),
         }
     }
 }
@@ -633,10 +636,20 @@ mod tests {
                 shooter: "b".into(),
             },
         ));
+        net_in.ephemeral.push((
+            "peer".into(),
+            Ephemeral::RadarLocking {
+                target: "me".into(),
+            },
+        ));
         world.insert_resource(net_in);
         world.run_system_once(drop_input_outside_game).unwrap();
         let net_in = world.resource::<NetIn>();
         assert!(net_in.snapshots.is_empty() && net_in.sequenced.is_empty());
+        assert!(
+            net_in.ephemeral.is_empty(),
+            "stale flares would decoy missiles in the next game"
+        );
     }
 
     #[test]

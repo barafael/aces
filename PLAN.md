@@ -33,10 +33,13 @@ host-sequenced events) but change the authority model:
 - **Sequenced events** (reliable, host-sequenced): missile launches, gun-hit /
   damage claims, kills. Trust-based P2P: shooter claims hits, victim applies
   damage to their own HP and broadcasts it.
-- **Missiles**: owner-simulated with proportional navigation; launch event
-  spawns it on all peers, snapshots stream on the unreliable channel.
-- **Ephemeral** (unreliable): tracers, countermeasure pops, "I'm locking you"
-  (drives victim's RWR), flare/chaff deployment events.
+- **Missiles**: every peer simulates each missile (pure pursuit, arcade) —
+  the shooter from fire time, everyone else from the sequenced launch event;
+  only the shooter's simulation claims hits.
+- **Ephemeral** (unsequenced, peer to peer, attributed to the sender):
+  countermeasure pops on the reliable channel (they decide whether a
+  missile hits, so none may be lost), "I'm locking you" announcements
+  (drive the victim's RWR; they repeat) on the unreliable one.
 - **Deathmatch**: unlimited duration, death → explosion → 3 s respawn at a
   random spawn point, score per kill.
 
@@ -103,14 +106,16 @@ the raw mouse events (to tune sensitivity/leveling too).
 | Weapon | Lock | Counter |
 |---|---|---|
 | Gun (`Space`) | none — hitscan raycast, tracers | — |
-| IR missile (`Ctrl` + slot 2) | target in ~10° cone, < 4 km, ~2 s lock | flares distract if deployed within window |
-| Radar missile (`Ctrl` + slot 3) | target in ~30° cone, < 8 km, ~2 s lock | chaff breaks lock → missile goes ballistic |
+| IR missile (`Ctrl` + slot 2) | target in ~10° cone, < 4 km, ~1.5 s lock | flares distract if deployed within window |
+| Radar missile (`Ctrl` + slot 3) | target in ~30° cone, < 8 km, ~2 s lock | chaff breaks guidance → missile flies straight |
 
 - **`F` flare**, **`C` chaff** — separate stores (12 each), regen 1 per 5 s.
   RWR announces the threat type (flares vs IR, chaff vs radar) so the player
   pops the right one.
-- Lock logic runs on the shooter from snapshots; lock reticle + RWR warning
-  via ephemeral messages.
+- Lock logic runs on the shooter from snapshots; a held radar lock is
+  announced to its target (RWR) via ephemeral messages. The inbound-missile
+  warning comes from the target's own simulation of each missile aimed at
+  it: on while one is guided at it, off once it hits, expires or is decoyed.
 
 ## Aircraft
 
@@ -226,15 +231,24 @@ camera) · `weapons` (gun, missiles, lock, countermeasures, damage) · `net`
 - Milestone 4 verified live: mutual missile kills across two instances —
   damage applied by the victim (100 → 40 → overkill), `Killed` confirmed,
   respawn on the next ring slot, HP riding the plane snapshots.
-- Missile hits are claimed only by the owner's simulation (M4 accidentally
-  let the victim's sim claim); the shooter spawns its own missiles and
-  everyone else spawns them from the sequenced event.
+- Missiles: the shooter spawns its own at fire time (no host round trip
+  before it sees it), everyone else from the sequenced launch; only the
+  shooter's simulation claims a hit, against the plane actually hit (a
+  bystander inside the fuse takes the damage, not the target).
 - Milestone 5 verified live: chaff broke radar guidance and flares
   captured seekers across two instances — a perfectly-timed pop defeats a
   missile, stores (12 + 12, regen 5 s) make it a resource game.
 - The auto-dogfight flies with energy discipline: below 130 m/s it flies
   level to regain speed (a max-G pursuit mushes into a stall and never
-  merges — observed in the flight logs).
+  merges — observed in the flight logs). It launches one missile per 3 s
+  and pops one countermeasure per inbound missile.
+- Every simulation of a missile — the victim's own included — consults the
+  target's countermeasure pops, so the victim sees the decoy the shooter's
+  simulation fell for (instead of a missile exploding on it harmlessly).
+- A held lock stays on its target inside the drop cone: a plane crossing
+  nearer the center does not steal it.
+- Kills are counted by every peer, the victim included, from the canonical
+  `Killed` stream; the scoreboard lists the whole roster.
 - Native + browser (wasm via trunk, share links with `?room=`).
 - Semi-realistic flight model; cone-based arcade radar/IR.
 - 3-crate workspace like gnils; bevy 0.19 to match gnils.

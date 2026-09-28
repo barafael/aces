@@ -12,3 +12,7 @@ serde = { version = "1", features = ["derive"] }
 # The flight recorder / replay (native only: the browser has no filesystem).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[dev-dependencies]
+# Peer ids for tests that play a known local peer.
+uuid = "1"

@@ -11,6 +11,12 @@
 //!   (with the airframe's boost: AB or WEP), load factor,
 //!   angle of attack, the limiter state, the flight recorder and a stall
 //!   warning.
+//! - **Weapons** (top right): health, the selected weapon, missiles and
+//!   countermeasures left, both locks.
+//! - **Threat line** (top center): the RWR — inbound missiles and radar
+//!   locks, naming the countermeasure that defeats them — or the respawn
+//!   countdown while shot down; the kill feed below it.
+//! - **Scoreboard** (hold `Tab`): every pilot's kills and deaths.
 //!
 //! Markers are small procedural textures on absolutely positioned UI nodes,
 //! projected with the camera transform the chase cam wrote this frame.
@@ -30,6 +36,9 @@ use crate::Phase;
 use crate::flight::input::{FlightInput, MouseAim};
 use crate::flight::model::{FlightState, boost_fraction};
 use crate::flight::{Aircraft, LocalPlane, camera};
+use crate::weapons::{
+    Countermeasures, Health, KillFeed, Loadout, Lock, Locks, Rwr, Scoreboard, WeaponSlot,
+};
 
 /// Marker size in logical pixels.
 const MARKER_SIZE: f32 = 28.0;
@@ -68,6 +77,15 @@ struct KillFeedText;
 
 #[derive(Component)]
 struct ScoreboardOverlay;
+
+/// One column of the scoreboard: a text per column, so the proportional
+/// font still lines up.
+#[derive(Component, Clone, Copy)]
+enum ScoreColumn {
+    Pilot,
+    Kills,
+    Deaths,
+}
 
 pub struct HudPlugin;
 
@@ -276,61 +294,92 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>, assets: 
                 ));
             });
 
-            // RWR threat line, top center.
-            hud.spawn((
-                ThreatWarning,
-                Node {
-                    position_type: PositionType::Absolute,
-                    top: Val::Px(12.0),
-                    ..default()
-                },
-                Text::default(),
-                TextFont {
-                    font: font.clone().into(),
-                    font_size: FontSize::Px(24.0),
-                    ..default()
-                },
-                TextColor(Color::srgb(1.0, 0.25, 0.15)),
-                Visibility::Hidden,
-            ));
+            // RWR threat line and the kill feed below it, top center. An
+            // absolute node without horizontal insets would sit at the left
+            // edge: this one spans the width and centers its children.
+            hud.spawn(Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(12.0),
+                left: Val::Px(0.0),
+                right: Val::Px(0.0),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                row_gap: Val::Px(4.0),
+                ..default()
+            })
+            .with_children(|center| {
+                center.spawn((
+                    ThreatWarning,
+                    // Keeps its line while blank, so the feed never jumps.
+                    Node {
+                        min_height: Val::Px(30.0),
+                        ..default()
+                    },
+                    Text::default(),
+                    TextFont {
+                        font: font.clone().into(),
+                        font_size: FontSize::Px(24.0),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(1.0, 0.25, 0.15)),
+                    Visibility::Hidden,
+                ));
+                center.spawn((
+                    KillFeedText,
+                    Text::default(),
+                    TextFont {
+                        font: font.clone().into(),
+                        font_size: FontSize::Px(17.0),
+                        ..default()
+                    },
+                    TextLayout::justify(Justify::Center),
+                    TextColor(Color::srgba(0.95, 0.95, 0.98, 0.9)),
+                ));
+            });
 
-            // Kill feed, under the threat line.
-            hud.spawn((
-                KillFeedText,
-                Node {
-                    position_type: PositionType::Absolute,
-                    top: Val::Px(46.0),
-                    ..default()
-                },
-                Text::default(),
-                TextFont {
-                    font: font.clone().into(),
-                    font_size: FontSize::Px(17.0),
-                    ..default()
-                },
-                TextColor(Color::srgba(0.95, 0.95, 0.98, 0.9)),
-            ));
-
-            // Scoreboard overlay, held on Tab.
+            // Scoreboard overlay, held on Tab, centered.
             hud.spawn((
                 ScoreboardOverlay,
                 Node {
                     position_type: PositionType::Absolute,
                     top: Val::Percent(24.0),
-                    padding: UiRect::axes(Val::Px(18.0), Val::Px(12.0)),
-                    border_radius: BorderRadius::all(Val::Px(8.0)),
+                    left: Val::Px(0.0),
+                    right: Val::Px(0.0),
+                    justify_content: JustifyContent::Center,
                     ..default()
                 },
-                BackgroundColor(Color::srgba(0.02, 0.04, 0.08, 0.75)),
-                Text::default(),
-                TextFont {
-                    font: font.into(),
-                    font_size: FontSize::Px(19.0),
-                    ..default()
-                },
-                TextColor(Color::srgb(0.9, 0.95, 1.0)),
                 Visibility::Hidden,
-            ));
+            ))
+            .with_children(|row| {
+                row.spawn((
+                    Node {
+                        padding: UiRect::axes(Val::Px(18.0), Val::Px(12.0)),
+                        column_gap: Val::Px(28.0),
+                        border_radius: BorderRadius::all(Val::Px(8.0)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.02, 0.04, 0.08, 0.75)),
+                ))
+                .with_children(|panel| {
+                    for (column, justify) in [
+                        (ScoreColumn::Pilot, Justify::Left),
+                        (ScoreColumn::Kills, Justify::Right),
+                        (ScoreColumn::Deaths, Justify::Right),
+                    ] {
+                        panel.spawn((
+                            column,
+                            Text::default(),
+                            TextFont {
+                                font: font.clone().into(),
+                                font_size: FontSize::Px(19.0),
+                                ..default()
+                            },
+                            TextLayout::justify(justify),
+                            TextColor(Color::srgb(0.9, 0.95, 1.0)),
+                        ));
+                    }
+                });
+            });
         });
 }
 
@@ -432,132 +481,135 @@ fn update_info(
     });
 }
 
-/// Weapon selection, stores, lock status and the RWR picture.
+/// Health, weapon selection, stores and locks; the threat line — the RWR
+/// picture, or the respawn countdown while shot down.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn update_weapons_hud(
     time: Res<Time>,
-    slot: Res<crate::weapons::WeaponSlot>,
-    loadout: Res<crate::weapons::Loadout>,
-    countermeasures: Res<crate::weapons::Countermeasures>,
-    ir: Res<crate::weapons::IrLock>,
-    radar: Res<crate::weapons::RadarLock>,
-    rwr: Res<crate::weapons::Rwr>,
+    slot: Res<WeaponSlot>,
+    loadout: Res<Loadout>,
+    countermeasures: Res<Countermeasures>,
+    locks: Res<Locks>,
+    rwr: Res<Rwr>,
+    health: Single<&Health, With<LocalPlane>>,
     mut weapons: Single<&mut Text, With<WeaponsInfo>>,
-    mut threat: Single<
-        (&mut Text, &mut Visibility),
-        (With<ThreatWarning>, Without<WeaponsInfo>),
-    >,
+    mut threat: Single<(&mut Text, &mut Visibility), (With<ThreatWarning>, Without<WeaponsInfo>)>,
     mut buffer: Local<String>,
 ) {
     let slot_label = match *slot {
-        crate::weapons::WeaponSlot::Gun => "GUN",
-        crate::weapons::WeaponSlot::IrMissile => "IR",
-        crate::weapons::WeaponSlot::RadarMissile => "RADAR",
-    };
-    let lock_label = |progress: f32, name: &str| {
-        if progress >= 1.0 {
-            format!("{name} LOCKED")
-        } else if progress > 0.0 {
-            format!("{name} {:>3.0}%", progress * 100.0)
-        } else {
-            format!("{name} —")
-        }
+        WeaponSlot::Gun => "GUN",
+        WeaponSlot::IrMissile => "IR",
+        WeaponSlot::RadarMissile => "RADAR",
     };
     buffer.clear();
     let _ = write!(
         buffer,
-        "[{slot_label}]  SPACE gun\nIR {}  RADAR {}\nFLARES {}  CHAFF {}\n{}  {}",
+        "HP {:.0}\n[{slot_label}]  SPACE gun\nIR {}  RADAR {}\nFLARES {}  CHAFF {}\n",
+        health.hp.ceil(),
         loadout.ir_missiles,
         loadout.radar_missiles,
         countermeasures.flares,
         countermeasures.chaff,
-        lock_label(ir.progress, "IR"),
-        lock_label(radar.progress, "RDR"),
     );
+    write_lock(&mut buffer, "IR", &locks.ir);
+    buffer.push_str("  ");
+    write_lock(&mut buffer, "RDR", &locks.radar);
     set_text(&mut weapons, &buffer);
 
-    // RWR: newest threat wins; flash while active.
+    // The respawn countdown while shot down (steady); otherwise the RWR,
+    // missiles before locks, blinking while active.
     let now = time.elapsed_secs_f64();
-    let missile = rwr
-        .missile
-        .filter(|(until, _)| now <= *until)
-        .map(|(_, kind)| match kind {
-            crate::weapons::MissileKind::Ir => "MISSILE — FLARES (F)",
-            crate::weapons::MissileKind::Radar => "MISSILE — CHAFF (C)",
-        });
-    let locked = rwr
-        .radar_locked_until
-        .filter(|until| now <= *until)
-        .map(|_| "RADAR LOCK — CHAFF (C)");
-    let threat_text = missile.or(locked);
-    match threat_text {
-        Some(text) => {
-            set_text(&mut threat.0, text);
-            let blink = ((now * 3.0) as u64).is_multiple_of(2);
-            *threat.1 = if blink {
-                Visibility::Visible
-            } else {
-                Visibility::Hidden
-            };
+    let (line, blinks) = match loadout.respawn_in {
+        Some(remaining) => {
+            buffer.clear();
+            let _ = write!(buffer, "SHOT DOWN — back in {:.0} s", remaining.ceil());
+            (Some(buffer.as_str()), false)
         }
         None => {
-            set_text(&mut threat.0, "");
-            *threat.1 = Visibility::Hidden;
+            let warning = match (rwr.ir_inbound, rwr.radar_inbound) {
+                (true, true) => Some("MISSILES — FLARES (F) + CHAFF (C)"),
+                (true, false) => Some("MISSILE — FLARES (F)"),
+                (false, true) => Some("MISSILE — CHAFF (C)"),
+                (false, false) => rwr
+                    .radar_locked_until
+                    .filter(|until| now <= *until)
+                    .map(|_| "RADAR LOCK — CHAFF (C)"),
+            };
+            (warning, true)
         }
-    }
+    };
+    let (text, visibility) = &mut *threat;
+    set_text(text, line.unwrap_or(""));
+    let lit = !blinks || ((now * 3.0) as u64).is_multiple_of(2);
+    // `Inherited`, never `Visible`: a `Visible` child would outlive the
+    // HUD root being hidden (and stay on the menu).
+    visibility.set_if_neq(if line.is_some() && lit {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    });
+}
+
+/// "IR LOCKED", "IR  45%" or "IR —".
+fn write_lock(buffer: &mut String, name: &str, lock: &Lock) {
+    let _ = if lock.progress >= 1.0 {
+        write!(buffer, "{name} LOCKED")
+    } else if lock.progress > 0.0 {
+        write!(buffer, "{name} {:>3.0}%", lock.progress * 100.0)
+    } else {
+        write!(buffer, "{name} —")
+    };
 }
 
 /// Kill feed (recent kills) and the Tab scoreboard.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn update_score_hud(
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     net: Res<NetState>,
-    scoreboard: Res<crate::weapons::Scoreboard>,
-    kill_feed: Res<crate::weapons::KillFeed>,
-    mut feed: Single<&mut Text, With<KillFeedText>>,
-    mut board: Single<
-        (&mut Text, &mut Visibility),
-        (With<ScoreboardOverlay>, Without<KillFeedText>),
-    >,
+    scoreboard: Res<Scoreboard>,
+    kill_feed: Res<KillFeed>,
+    mut feed: Single<&mut Text, (With<KillFeedText>, Without<ScoreColumn>)>,
+    mut overlay: Single<&mut Visibility, With<ScoreboardOverlay>>,
+    mut columns: Query<(&ScoreColumn, &mut Text), Without<KillFeedText>>,
     mut buffer: Local<String>,
 ) {
-    let now = time.elapsed_secs_f64();
-
     buffer.clear();
-    for line in kill_feed.fresh(now) {
+    for line in kill_feed.fresh(time.elapsed_secs_f64()) {
+        if !buffer.is_empty() {
+            buffer.push('\n');
+        }
         buffer.push_str(line);
-        buffer.push('\n');
     }
     set_text(&mut feed, &buffer);
 
-    if keys.pressed(KeyCode::Tab) {
-        let mut rows: Vec<(&String, crate::weapons::Score)> = scoreboard
-            .entries
-            .iter()
-            .map(|(peer, score)| (peer, *score))
-            .collect();
-        rows.sort_by(|a, b| {
-            b.1.kills
-                .cmp(&a.1.kills)
-                .then(b.1.deaths.cmp(&a.1.deaths))
-                .then(a.0.cmp(b.0))
-        });
-        buffer.clear();
-        buffer.push_str("PILOT        K    D\n");
-        for (peer, score) in rows {
-            let name = crate::weapons::callsign(&net, peer);
-            buffer.push_str(&format!(
-                "{:<12} {:<4} {}\n",
-                truncate(&name, 12),
-                score.kills,
-                score.deaths
-            ));
-        }
-        set_text(&mut board.0, &buffer);
-        *board.1 = Visibility::Visible;
+    let held = keys.pressed(KeyCode::Tab);
+    overlay.set_if_neq(if held {
+        Visibility::Inherited
     } else {
-        *board.1 = Visibility::Hidden;
+        Visibility::Hidden
+    });
+    // The board only changes on kills: rebuild it when it opens or changes.
+    if !held || !(keys.just_pressed(KeyCode::Tab) || scoreboard.is_changed()) {
+        return;
+    }
+    let rows = scoreboard.rows(&net);
+    for (column, mut text) in &mut columns {
+        buffer.clear();
+        buffer.push_str(match column {
+            ScoreColumn::Pilot => "PILOT",
+            ScoreColumn::Kills => "K",
+            ScoreColumn::Deaths => "D",
+        });
+        for (name, score) in &rows {
+            buffer.push('\n');
+            let _ = match column {
+                ScoreColumn::Pilot => write!(buffer, "{}", truncate(name, 16)),
+                ScoreColumn::Kills => write!(buffer, "{}", score.kills),
+                ScoreColumn::Deaths => write!(buffer, "{}", score.deaths),
+            };
+        }
+        set_text(&mut text, &buffer);
     }
 }
 

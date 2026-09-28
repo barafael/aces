@@ -7,11 +7,13 @@
 //!
 //! What differs from gnils (see PLAN.md "Netcode"): a flight sim moves
 //! continuously, so peers are authoritative over their *own* planes —
-//! - reliable channel: lobby (`Hello`, `Roster`, `Start`) and sequenced
-//!   game events (`Game` submissions sequenced by the host into
-//!   `Sequenced` rebroadcasts; empty event set until milestone 4),
+//! - reliable channel: lobby (`Hello`, `Roster`, `Start`), sequenced game
+//!   events (`Game` submissions sequenced by the host into `Sequenced`
+//!   rebroadcasts) and the [`Ephemeral`]s that must arrive (countermeasure
+//!   pops, see [`Ephemeral::reliable`]),
 //! - unreliable channel: [`NetMsg::Snapshot`] state broadcasts, which every
-//!   receiver interpolates. Snapshots are fire-and-forget; the newest wins.
+//!   receiver interpolates, and repeating ephemerals (radar-lock
+//!   announcements). Fire-and-forget; the newest wins.
 //!
 //! The host is the roster authority; guests take its `Roster`/`Start`
 //! broadcasts verbatim.
@@ -29,9 +31,11 @@ pub const SIGNALING_SERVER: &str = if let Some(s) = option_env!("MATCHBOX_SERVER
     "wss://omdurman-matchbox.fly.dev"
 };
 
-/// Reliable, ordered channel: lobby traffic, sequenced game events.
+/// Reliable, ordered channel: lobby traffic, sequenced game events,
+/// countermeasure pops.
 pub const CH_RELIABLE: usize = 0;
-/// Unreliable channel: plane snapshots (newest wins).
+/// Unreliable channel: plane snapshots and radar-lock announcements (newest
+/// wins).
 pub const CH_UNRELIABLE: usize = 1;
 
 pub use matchbox_socket::{ChannelConfig, PeerId, PeerState};
@@ -45,6 +49,25 @@ pub enum DamageCause {
     Missile,
 }
 
+/// Missile guidance family.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MissileKind {
+    /// Chases heat; distracted by flares.
+    Ir,
+    /// Chases radar returns; broken by chaff.
+    Radar,
+}
+
+impl MissileKind {
+    /// Which countermeasure defeats this missile.
+    pub fn counter(self) -> CmKind {
+        match self {
+            MissileKind::Ir => CmKind::Flares,
+            MissileKind::Radar => CmKind::Chaff,
+        }
+    }
+}
+
 /// Countermeasure type: what breaks what.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CmKind {
@@ -54,16 +77,31 @@ pub enum CmKind {
     Chaff,
 }
 
-/// Unreliable-channel, fire-and-forget effects (PLAN.md "Ephemeral").
-/// Never authoritative; the newest one supersedes.
+/// Peer-to-peer effects that bypass the host's sequencing (PLAN.md
+/// "Ephemeral"): nobody needs them in a canonical order. The sender is the
+/// peer they concern — receivers take it from the transport, never from the
+/// payload.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum Ephemeral {
-    /// Someone deployed countermeasures: receivers play the visual, and the
-    /// missile owner uses it to distract/break guidance.
-    Countermeasures { peer: String, kind: CmKind, pos: [f32; 3] },
-    /// A radar lock is being held on `target` (repeats while held); the
+    /// The sender deployed countermeasures at `pos`: receivers play the
+    /// visual, and missile owners consult it to distract/break guidance.
+    Countermeasures { kind: CmKind, pos: [f32; 3] },
+    /// The sender holds a radar lock on `target` (repeats while held); the
     /// target's RWR announces it.
     RadarLocking { target: String },
+}
+
+impl Ephemeral {
+    /// Whether this effect must arrive. A countermeasure pop decides
+    /// whether a missile hits, so losing one would silently defeat the
+    /// pilot who timed it; lock announcements repeat, so a lost one is
+    /// superseded by the next.
+    pub fn reliable(&self) -> bool {
+        match self {
+            Ephemeral::Countermeasures { .. } => true,
+            Ephemeral::RadarLocking { .. } => false,
+        }
+    }
 }
 
 /// Semantic in-game events, host-sequenced. Applied only in `Sequenced`
@@ -75,10 +113,7 @@ pub enum GameEvent {
     /// authority stays with the shooter, who claims `Damage`).
     MissileLaunched {
         shooter: String,
-        /// Per-shooter launch counter, to tell consecutive missiles apart.
-        missile: u8,
-        /// 0 = IR heat-seeker (radar arrives in milestone 5).
-        kind: u8,
+        kind: MissileKind,
         pos: [f32; 3],
         /// Orientation (x, y, z, w).
         quat: [f32; 4],
@@ -125,7 +160,8 @@ pub enum NetMsg {
     Sequenced { seq: u32, event: GameEvent },
     /// Any -> all, unreliable: the sender's own plane state.
     Snapshot(PlaneSnapshot),
-    /// Any -> all, unreliable: fire-and-forget effects.
+    /// Any -> all, unsequenced: effects that need no canonical order (on
+    /// the channel [`Ephemeral::reliable`] picks).
     Ephemeral(Ephemeral),
 }
 
@@ -469,8 +505,8 @@ pub fn build_socket(room: &str) -> MatchboxSocket {
     let builder = WebRtcSocketBuilder::new(&url)
         .ice_server(ice_config)
         .reconnect_attempts(None) // unlimited reconnection attempts
-        .add_reliable_channel() // channel 0: lobby + sequenced events
-        .add_unreliable_channel(); // channel 1: snapshots
+        .add_reliable_channel() // channel 0: lobby, sequenced events, countermeasures
+        .add_unreliable_channel(); // channel 1: snapshots, lock announcements
 
     MatchboxSocket::from(builder)
 }
@@ -594,8 +630,7 @@ mod tests {
         });
         let launched = NetMsg::Game(GameEvent::MissileLaunched {
             shooter: "peer-a".into(),
-            missile: 3,
-            kind: 0,
+            kind: MissileKind::Radar,
             pos: [1.0, 2.0, 3.0],
             quat: [0.0, 0.0, 0.0, 1.0],
             speed: 250.0,
@@ -612,7 +647,6 @@ mod tests {
             shooter: "peer-a".into(),
         });
         let cm = NetMsg::Ephemeral(Ephemeral::Countermeasures {
-            peer: "peer-b".into(),
             kind: CmKind::Flares,
             pos: [1.0, 2.0, 3.0],
         });
@@ -639,15 +673,29 @@ mod tests {
         }
     }
 
+    /// A countermeasure pop decides a hit, so it must not be lost; a lock
+    /// announcement repeats, so it may be.
+    #[test]
+    fn only_countermeasures_need_the_reliable_channel() {
+        let pop = Ephemeral::Countermeasures {
+            kind: CmKind::Chaff,
+            pos: [0.0; 3],
+        };
+        let locking = Ephemeral::RadarLocking {
+            target: "peer-b".into(),
+        };
+        assert!(pop.reliable());
+        assert!(!locking.reliable());
+    }
+
     #[test]
     fn decoding_garbage_yields_none() {
         assert!(decode(&[0xff, 0xff, 0xff, 0xff]).is_none());
     }
 
-    /// The empty event set cannot decode a `Game`/`Sequenced` payload — and
-    /// that must fail gracefully to `None`, not panic.
+    /// A truncated `Game` payload must fail gracefully to `None`, not panic.
     #[test]
-    fn decoding_the_empty_event_fails_gracefully() {
+    fn decoding_a_truncated_event_fails_gracefully() {
         // postcard enum tag 3 = Game, followed by nothing it can decode.
         assert!(decode(&[3]).is_none());
     }

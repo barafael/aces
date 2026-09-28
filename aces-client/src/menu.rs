@@ -58,11 +58,11 @@ fn update_panel_visibility(
     phase: Res<State<Phase>>,
     mut panel: Single<&mut Visibility, With<MenuPanel>>,
 ) {
-    **panel = if phase.get() == &Phase::InGame {
+    panel.set_if_neq(if phase.get() == &Phase::InGame {
         Visibility::Hidden
     } else {
         Visibility::Visible
-    };
+    });
 }
 
 /// The main menu's credits screen is open.
