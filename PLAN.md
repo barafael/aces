@@ -232,9 +232,9 @@ camera) · `weapons` (gun, missiles, lock, countermeasures, damage) · `net`
 - Milestone 5 verified live: chaff broke radar guidance and flares
   captured seekers across two instances — a perfectly-timed pop defeats a
   missile, stores (12 + 12, regen 5 s) make it a resource game.
-- The auto-dogfight flies with energy discipline: below 130 km/h… m/s it
-  flies level to regain speed (a max-G pursuit mushes into a stall and
-  never merges — observed in the flight logs).
+- The auto-dogfight flies with energy discipline: below 130 m/s it flies
+  level to regain speed (a max-G pursuit mushes into a stall and never
+  merges — observed in the flight logs).
 - Native + browser (wasm via trunk, share links with `?room=`).
 - Semi-realistic flight model; cone-based arcade radar/IR.
 - 3-crate workspace like gnils; bevy 0.19 to match gnils.
