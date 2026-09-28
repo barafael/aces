@@ -24,6 +24,8 @@ use bevy::ui::Val2;
 use core::fmt::Write as _;
 use core::time::Duration;
 
+use aces_net::NetState;
+
 use crate::Phase;
 use crate::flight::input::{FlightInput, MouseAim};
 use crate::flight::model::{FlightState, boost_fraction};
@@ -61,6 +63,12 @@ struct WeaponsInfo;
 #[derive(Component)]
 struct ThreatWarning;
 
+#[derive(Component)]
+struct KillFeedText;
+
+#[derive(Component)]
+struct ScoreboardOverlay;
+
 pub struct HudPlugin;
 
 impl Plugin for HudPlugin {
@@ -73,6 +81,7 @@ impl Plugin for HudPlugin {
                     update_markers,
                     update_info.run_if(on_timer(Duration::from_secs_f32(1.0 / INFO_HZ))),
                     update_weapons_hud,
+                    update_score_hud,
                 )
                     .after(camera::update_camera)
                     .run_if(in_state(Phase::InGame)),
@@ -277,11 +286,49 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>, assets: 
                 },
                 Text::default(),
                 TextFont {
-                    font: font.into(),
+                    font: font.clone().into(),
                     font_size: FontSize::Px(24.0),
                     ..default()
                 },
                 TextColor(Color::srgb(1.0, 0.25, 0.15)),
+                Visibility::Hidden,
+            ));
+
+            // Kill feed, under the threat line.
+            hud.spawn((
+                KillFeedText,
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: Val::Px(46.0),
+                    ..default()
+                },
+                Text::default(),
+                TextFont {
+                    font: font.clone().into(),
+                    font_size: FontSize::Px(17.0),
+                    ..default()
+                },
+                TextColor(Color::srgba(0.95, 0.95, 0.98, 0.9)),
+            ));
+
+            // Scoreboard overlay, held on Tab.
+            hud.spawn((
+                ScoreboardOverlay,
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: Val::Percent(24.0),
+                    padding: UiRect::axes(Val::Px(18.0), Val::Px(12.0)),
+                    border_radius: BorderRadius::all(Val::Px(8.0)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.02, 0.04, 0.08, 0.75)),
+                Text::default(),
+                TextFont {
+                    font: font.into(),
+                    font_size: FontSize::Px(19.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.9, 0.95, 1.0)),
                 Visibility::Hidden,
             ));
         });
@@ -457,5 +504,68 @@ fn update_weapons_hud(
             set_text(&mut threat.0, "");
             *threat.1 = Visibility::Hidden;
         }
+    }
+}
+
+/// Kill feed (recent kills) and the Tab scoreboard.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+fn update_score_hud(
+    keys: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
+    net: Res<NetState>,
+    scoreboard: Res<crate::weapons::Scoreboard>,
+    kill_feed: Res<crate::weapons::KillFeed>,
+    mut feed: Single<&mut Text, With<KillFeedText>>,
+    mut board: Single<
+        (&mut Text, &mut Visibility),
+        (With<ScoreboardOverlay>, Without<KillFeedText>),
+    >,
+    mut buffer: Local<String>,
+) {
+    let now = time.elapsed_secs_f64();
+
+    buffer.clear();
+    for line in kill_feed.fresh(now) {
+        buffer.push_str(line);
+        buffer.push('\n');
+    }
+    set_text(&mut feed, &buffer);
+
+    if keys.pressed(KeyCode::Tab) {
+        let mut rows: Vec<(&String, crate::weapons::Score)> = scoreboard
+            .entries
+            .iter()
+            .map(|(peer, score)| (peer, *score))
+            .collect();
+        rows.sort_by(|a, b| {
+            b.1.kills
+                .cmp(&a.1.kills)
+                .then(b.1.deaths.cmp(&a.1.deaths))
+                .then(a.0.cmp(b.0))
+        });
+        buffer.clear();
+        buffer.push_str("PILOT        K    D\n");
+        for (peer, score) in rows {
+            let name = crate::weapons::callsign(&net, peer);
+            buffer.push_str(&format!(
+                "{:<12} {:<4} {}\n",
+                truncate(&name, 12),
+                score.kills,
+                score.deaths
+            ));
+        }
+        set_text(&mut board.0, &buffer);
+        *board.1 = Visibility::Visible;
+    } else {
+        *board.1 = Visibility::Hidden;
+    }
+}
+
+fn truncate(value: &str, max: usize) -> String {
+    if value.chars().count() <= max {
+        value.to_string()
+    } else {
+        let cut: String = value.chars().take(max - 1).collect();
+        format!("{cut}…")
     }
 }

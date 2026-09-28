@@ -45,10 +45,24 @@ impl Plugin for MenuPlugin {
                     update_lobby.run_if(in_state(Phase::Lobby)),
                     update_in_game.run_if(in_state(Phase::InGame)),
                     update_ui_text,
+                    update_panel_visibility,
                     update_cursor,
                 ),
             );
     }
+}
+
+/// Hide the menu rectangle while flying: the phase system blanks the texts,
+/// but the panel's background would otherwise stay on screen.
+fn update_panel_visibility(
+    phase: Res<State<Phase>>,
+    mut panel: Single<&mut Visibility, With<MenuPanel>>,
+) {
+    **panel = if phase.get() == &Phase::InGame {
+        Visibility::Hidden
+    } else {
+        Visibility::Visible
+    };
 }
 
 /// The main menu's credits screen is open.

@@ -28,6 +28,7 @@ use bevy::prelude::*;
 
 use aces_net::{CmKind, DamageCause, Ephemeral, GameEvent, NetState};
 use aces_protocol::spawn_point;
+use std::collections::HashMap;
 use std::env;
 
 use crate::flight::input::{FlightInput, MouseAim};
@@ -274,6 +275,74 @@ pub struct Rwr {
     pub missile: Option<(f64, MissileKind)>,
 }
 
+/// Kills and deaths per peer, counted from the canonical `Sequenced`
+/// stream — every peer counts the same events, so boards agree.
+#[derive(Resource, Default, Clone)]
+pub struct Scoreboard {
+    pub entries: HashMap<String, Score>,
+}
+
+/// One peer's tally.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Score {
+    pub kills: u32,
+    pub deaths: u32,
+}
+
+impl Scoreboard {
+    fn kill(&mut self, peer: &str) {
+        self.entries.entry(peer.to_string()).or_default().kills += 1;
+    }
+
+    fn death(&mut self, peer: &str) {
+        self.entries.entry(peer.to_string()).or_default().deaths += 1;
+    }
+
+    /// One peer's tally (test helper; the HUD reads `entries` directly).
+    #[cfg(test)]
+    pub fn get(&self, peer: &str) -> Score {
+        self.entries.get(peer).copied().unwrap_or_default()
+    }
+}
+
+/// Recent kills for the HUD feed, newest last.
+#[derive(Resource, Default)]
+pub struct KillFeed {
+    pub entries: Vec<(f64, String)>,
+}
+
+/// How long a kill stays in the feed [s].
+pub const KILL_FEED_LIFE: f64 = 6.0;
+/// Feed capacity (oldest dropped beyond this).
+pub const KILL_FEED_MAX: usize = 5;
+
+impl KillFeed {
+    fn push(&mut self, now: f64, text: String) {
+        self.entries.push((now, text));
+        while self.entries.len() > KILL_FEED_MAX {
+            self.entries.remove(0);
+        }
+    }
+
+    /// Drop expired entries; keep only fresh ones.
+    pub fn fresh(&self, now: f64) -> impl Iterator<Item = &str> {
+        self.entries
+            .iter()
+            .filter(move |(at, _)| now - *at < KILL_FEED_LIFE)
+            .map(|(_, text)| text.as_str())
+    }
+
+}
+
+/// The pilot name a peer goes by (roster name, or a short peer id).
+pub fn callsign(net: &NetState, peer: &str) -> String {
+    net.players
+        .iter()
+        .find(|p| p.peer == peer)
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| format!("pilot-{}", &peer[..peer.len().min(4)]))
+}
+
 /// Shared explosion assets: one sphere mesh, base materials that each
 /// explosion clones so fade-outs animate independently.
 #[derive(Resource, Clone)]
@@ -295,6 +364,8 @@ impl Plugin for WeaponsPlugin {
             .init_resource::<Countermeasures>()
             .init_resource::<CmDeployments>()
             .init_resource::<Rwr>()
+            .init_resource::<Scoreboard>()
+            .init_resource::<KillFeed>()
             .init_resource::<GunCooldown>()
             .init_resource::<LockAnnounce>()
             .insert_resource(Loadout {
@@ -382,6 +453,8 @@ fn rearm(
     mut lock: ResMut<IrLock>,
     mut radar: ResMut<RadarLock>,
     mut countermeasures: ResMut<Countermeasures>,
+    mut scoreboard: ResMut<Scoreboard>,
+    mut kill_feed: ResMut<KillFeed>,
 ) {
     loadout.ir_missiles = IR_MISSILE_COUNT;
     loadout.radar_missiles = RADAR_MISSILE_COUNT;
@@ -390,6 +463,8 @@ fn rearm(
     *lock = IrLock::default();
     *radar = RadarLock::default();
     *countermeasures = Countermeasures::default();
+    scoreboard.entries.clear();
+    kill_feed.entries.clear();
 }
 
 fn my_peer(net: &NetState) -> String {
@@ -1074,6 +1149,8 @@ fn apply_events(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut rwr: ResMut<Rwr>,
+    mut scoreboard: ResMut<Scoreboard>,
+    mut kill_feed: ResMut<KillFeed>,
     mut plane: Single<(&mut FlightState, &mut Health, &mut Visibility), With<LocalPlane>>,
     mut remotes: Query<(&RemotePlane, &Transform, &mut Health), Without<LocalPlane>>,
     time: Res<Time>,
@@ -1149,6 +1226,17 @@ fn apply_events(
                         health.dead = true;
                     }
                 }
+                // Bookkeeping: everyone counts the same canonical event.
+                scoreboard.kill(&shooter);
+                scoreboard.death(&victim);
+                kill_feed.push(
+                    now,
+                    format!(
+                        "{} shot down {}",
+                        callsign(&net, &shooter),
+                        callsign(&net, &victim)
+                    ),
+                );
                 if shooter == me {
                     info!(%victim, "kill confirmed");
                 }
@@ -1550,6 +1638,35 @@ mod tests {
             decoy_for(MissileKind::Radar, "victim", missile_pos, &d, now),
             Decoy::Nothing
         );
+    }
+
+    /// The scoreboard tallies kills and deaths per peer.
+    #[test]
+    fn scoreboard_counts() {
+        let mut board = Scoreboard::default();
+        board.kill("a");
+        board.kill("a");
+        board.death("b");
+        assert_eq!(board.get("a"), Score { kills: 2, deaths: 0 });
+        assert_eq!(board.get("b"), Score { kills: 0, deaths: 1 });
+        assert_eq!(board.get("ghost"), Score::default());
+    }
+
+    /// The kill feed keeps the freshest few entries and expires the rest.
+    #[test]
+    fn kill_feed_expires() {
+        let mut feed = KillFeed::default();
+        feed.push(10.0, "old".into());
+        feed.push(10.0 + KILL_FEED_LIFE - 1.0, "fresh".into());
+        let now = 10.0 + KILL_FEED_LIFE;
+        let fresh: Vec<_> = feed.fresh(now).collect();
+        assert_eq!(fresh, vec!["fresh"]);
+
+        feed.push(now + 1.0, "newest".into());
+        for i in 0..(KILL_FEED_MAX + 2) {
+            feed.push(now + 1.0 + i as f64, format!("n{i}"));
+        }
+        assert!(feed.entries.len() <= KILL_FEED_MAX);
     }
 
     /// The latest matching deployment wins.
