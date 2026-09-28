@@ -4223,7 +4223,7 @@ dependencies = [
 [[package]]
 name = "matchbox_protocol"
 version = "0.15.0"
-source = "git+https://github.com/barafael/matchbox.git#f4bc731aae3dca4cd4a3906cb265adcd2ad16e2b"
+source = "git+https://github.com/barafael/matchbox.git?branch=bevy-0.19-socket-hardening#34d99382b20d5f9215fd44573da49f3872f6d976"
 dependencies = [
  "cfg-if",
  "derive_more",
@@ -4234,7 +4234,7 @@ dependencies = [
 [[package]]
 name = "matchbox_socket"
 version = "0.15.0"
-source = "git+https://github.com/barafael/matchbox.git#f4bc731aae3dca4cd4a3906cb265adcd2ad16e2b"
+source = "git+https://github.com/barafael/matchbox.git?branch=bevy-0.19-socket-hardening#34d99382b20d5f9215fd44573da49f3872f6d976"
 dependencies = [
  "async-compat",
  "async-trait",
