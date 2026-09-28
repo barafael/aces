@@ -1,8 +1,8 @@
 //! Menu, lobby and in-game overlays: keyboard-driven UI over the 3D scene.
 //!
-//! Flow: Menu (`F` solo, `H` host, `J` join) → Lobby (roster, number keys
-//! select the aircraft when there is a choice, host `Enter` starts) → InGame (`Esc` leaves). Joining asks for a
-//! room id with a minimal text field.
+//! Flow: Menu (`F` solo, `H` host, `J` join) → Lobby (roster, `←`/`→`
+//! cycle the aircraft when there is a choice, host `Enter` starts) → InGame
+//! (`Esc` leaves). Joining asks for a room id with a minimal text field.
 //!
 //! For hands-free two-instance testing, launching with a room id as the CLI
 //! argument (wasm: `?room=`) enables the auto flow: hosting/joining uses
@@ -65,9 +65,9 @@ fn update_panel_visibility(
     });
 }
 
-/// The main menu's credits screen is open.
+/// The main menu's credits screen: the page shown, `None` while closed.
 #[derive(Resource, Default)]
-struct CreditsOpen(bool);
+struct CreditsOpen(Option<usize>);
 
 /// State of the join-room text field.
 #[derive(Resource, Default)]
@@ -259,40 +259,81 @@ fn update_menu(
     }
 }
 
-/// `K` opens and closes the credits screen (`Esc` closes it too) — from the
-/// main menu, not while typing a room id.
+/// `K` opens and closes the credits screen (`Esc` closes it too), `←`/`→`
+/// turn its pages — from the main menu, not while typing a room id.
 fn toggle_credits(
     keys: Res<ButtonInput<KeyCode>>,
     draft: Res<JoinDraft>,
     mut credits: ResMut<CreditsOpen>,
 ) {
-    if !draft.active
-        && (keys.just_pressed(KeyCode::KeyK) || credits.0 && keys.just_pressed(KeyCode::Escape))
-    {
-        credits.0 = !credits.0;
+    if draft.active {
+        return;
     }
+    let pages = credits_pages();
+    credits.0 = match credits.0 {
+        None if keys.just_pressed(KeyCode::KeyK) => Some(0),
+        Some(_) if keys.any_just_pressed([KeyCode::KeyK, KeyCode::Escape]) => None,
+        Some(page) if keys.just_pressed(KeyCode::ArrowRight) => Some((page + 1) % pages),
+        Some(page) if keys.just_pressed(KeyCode::ArrowLeft) => Some((page + pages - 1) % pages),
+        open => open,
+    };
 }
 
 /// Run condition: the main menu (not the credits screen) takes input.
 fn credits_closed(credits: Res<CreditsOpen>) -> bool {
-    !credits.0
+    credits.0.is_none()
 }
 
-/// The credits screen: every third-party asset, as its license asks
-/// (title, author, source, license). `CREDITS.md` has the same.
-fn credits_text() -> String {
-    let mut text = String::from(
-        "aces — credits\n\nAircraft models from Sketchfab (scaled, rotated\nand re-centred in game):\n",
+/// Model credits per credits page: as many as fit the window's height.
+const CREDITS_PER_PAGE: usize = 6;
+
+/// Number of credits pages.
+fn credits_pages() -> usize {
+    AIRCRAFT
+        .iter()
+        .filter(|kind| kind.credit.is_some())
+        .count()
+        .div_ceil(CREDITS_PER_PAGE)
+        .max(1)
+}
+
+/// Credits page `page`: third-party assets as their licenses ask (title,
+/// author, source, license), the licenses' URLs under each page's models
+/// and the font on the last page. `CREDITS.md` has the same.
+fn credits_text(page: usize) -> String {
+    let pages = credits_pages();
+    let mut text = format!(
+        "aces — credits ({}/{pages})\n\nAircraft models from Sketchfab (scaled, rotated\nand re-centred in game):\n",
+        page + 1
     );
-    for credit in AIRCRAFT.iter().filter_map(|kind| kind.credit) {
+    let credits: Vec<_> = AIRCRAFT
+        .iter()
+        .filter_map(|kind| kind.credit)
+        .skip(page * CREDITS_PER_PAGE)
+        .take(CREDITS_PER_PAGE)
+        .collect();
+    for credit in &credits {
         text.push_str(&format!(
-            "\n{} — {}\n{}\n{} ({})\n",
-            credit.title, credit.author, credit.source, credit.license, credit.license_url
+            "\n{} — {}, {}\n{}\n",
+            credit.title, credit.author, credit.license, credit.source
         ));
     }
-    text.push_str(
-        "\nFont: FreeSans Bold (GNU FreeFont),\nFree Software Foundation — GNU GPL\n\nK / Esc — back",
-    );
+    let mut licenses: Vec<_> = credits
+        .iter()
+        .map(|credit| (credit.license, credit.license_url))
+        .collect();
+    licenses.sort_unstable();
+    licenses.dedup();
+    text.push('\n');
+    for (license, url) in licenses {
+        text.push_str(&format!("{license}: {url}\n"));
+    }
+    if page + 1 == pages {
+        text.push_str(
+            "\nFont: FreeSans Bold (GNU FreeFont),\nFree Software Foundation — GNU GPL\n",
+        );
+    }
+    text.push_str("\n← / → — page    K / Esc — back");
     text
 }
 
@@ -309,22 +350,16 @@ fn update_lobby(
     mut settle: Local<(f32, (usize, bool))>,
 ) {
     // Aircraft select re-greets, which is how the change propagates.
-    let select = [
-        KeyCode::Digit1,
-        KeyCode::Digit2,
-        KeyCode::Digit3,
-        KeyCode::Digit4,
-        KeyCode::Digit5,
-        KeyCode::Digit6,
-        KeyCode::Digit7,
-        KeyCode::Digit8,
-        KeyCode::Digit9,
-    ]
-    .iter()
-    .position(|k| keys.just_pressed(*k));
-    if let Some(slot) = select {
-        let aircraft = slot as u8;
-        if aircraft < AIRCRAFT_COUNT && net.aircraft != aircraft {
+    let step = if keys.just_pressed(KeyCode::ArrowRight) {
+        Some(1)
+    } else if keys.just_pressed(KeyCode::ArrowLeft) {
+        Some(AIRCRAFT_COUNT - 1)
+    } else {
+        None
+    };
+    if let Some(step) = step {
+        let aircraft = (net.aircraft + step) % AIRCRAFT_COUNT;
+        if net.aircraft != aircraft {
             net.aircraft = aircraft;
             net.greeted.clear();
             if net.is_host {
@@ -421,8 +456,8 @@ fn update_ui_text(
     // state, then touch only what differs.
     let (menu_text, lobby, hint) = match phase.get() {
         Phase::Menu => {
-            let text = if credits.0 {
-                credits_text()
+            let text = if let Some(page) = credits.0 {
+                credits_text(page)
             } else if draft.active {
                 format!(
                     "aces — join a room\n\nroom: {}_\n\nEnter — join\nEsc — cancel{}",
@@ -470,18 +505,13 @@ fn update_ui_text(
                     tags
                 ));
             }
+            lines.push('\n');
             if AIRCRAFT_COUNT > 1 {
-                lines.push('\n');
-                for (i, kind) in AIRCRAFT.iter().enumerate() {
-                    let current = if i == usize::from(net.aircraft) {
-                        " (selected)"
-                    } else {
-                        ""
-                    };
-                    lines.push_str(&format!("{} — {}{current}\n", i + 1, kind.name));
-                }
-            } else {
-                lines.push('\n');
+                lines.push_str(&format!(
+                    "← / → — aircraft: {} ({}/{AIRCRAFT_COUNT})\n",
+                    aircraft(net.aircraft).name,
+                    net.aircraft + 1,
+                ));
             }
             if net.is_host {
                 lines.push_str("Enter — start\n");
@@ -536,7 +566,7 @@ mod tests {
     /// The in-game credits carry every model's full attribution.
     #[test]
     fn credits_screen_lists_every_credit() {
-        let text = credits_text();
+        let text: String = (0..credits_pages()).map(credits_text).collect();
         for credit in AIRCRAFT.iter().filter_map(|kind| kind.credit) {
             for part in [
                 credit.title,

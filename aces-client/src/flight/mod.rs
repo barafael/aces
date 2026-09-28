@@ -49,6 +49,7 @@ use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
 
 use aces_net::NetState;
 use aces_protocol::{PlaneSnapshot, spawn_point};
+use core::f32::consts::{FRAC_PI_2, PI};
 use std::collections::VecDeque;
 
 use self::input::{FlightInput, FreeLook, MouseAim};
@@ -76,7 +77,7 @@ impl Plugin for FlightPlugin {
                     interpolate_pose,
                     animate_control_surfaces,
                     cycle_aircraft.run_if(in_state(crate::Phase::InGame)),
-                    drop_missing_models,
+                    settle_models,
                     camera::update_camera
                         .after(input::gather_input)
                         .after(interpolate_pose),
@@ -281,22 +282,29 @@ pub struct PlaneAssets {
     surface_material: Handle<StandardMaterial>,
     local_fuselage: Handle<StandardMaterial>,
     local_accent: Handle<StandardMaterial>,
-    /// glTF scene per aircraft, by [`aces_protocol::AIRCRAFT`] index;
+    /// glTF model per aircraft, by [`aces_protocol::AIRCRAFT`] index;
     /// `None` (the placeholder, or a model that failed to load) keeps the
     /// procedural airframe. All are loaded up front so `P` cycles
     /// instantly.
-    scenes: Vec<Option<Handle<WorldAsset>>>,
+    scenes: Vec<Option<PlaneModel>>,
+}
+
+/// An aircraft's glTF scene, and whether it is ready to show.
+struct PlaneModel {
+    scene: Handle<WorldAsset>,
+    /// Loaded, meshes and textures included (see [`settle_models`]).
+    ready: bool,
 }
 
 impl PlaneAssets {
-    /// The airframe variant shown for aircraft `selected`: its model, or
-    /// the placeholder (`0`) while it has none — the `.glb` files are kept
-    /// out of git, so a fresh checkout has none of them.
+    /// The airframe variant shown for aircraft `selected`: its model once it
+    /// is ready, the placeholder (`0`) until then — or for good, when it has
+    /// none (e.g. a checkout without the LFS models).
     fn shown(&self, selected: u8) -> u8 {
         if self
             .scenes
             .get(usize::from(selected))
-            .is_some_and(Option::is_some)
+            .is_some_and(|model| model.as_ref().is_some_and(|model| model.ready))
         {
             selected
         } else {
@@ -324,8 +332,10 @@ fn init_plane_assets(
     let scenes = aces_protocol::AIRCRAFT
         .iter()
         .map(|kind| {
-            kind.model
-                .map(|path| assets.load(GltfAssetLabel::Scene(0).from_asset(path)))
+            kind.model.map(|path| PlaneModel {
+                scene: assets.load(GltfAssetLabel::Scene(0).from_asset(path)),
+                ready: false,
+            })
         })
         .collect();
     commands.insert_resource(PlaneAssets {
@@ -490,33 +500,59 @@ fn show_model(
     }
 }
 
-/// A model that failed to load (e.g. its `.glb` is not in this checkout)
-/// is dropped, and every plane showing it falls back to the placeholder
-/// instead of flying invisible.
-fn drop_missing_models(
+/// Models load in the background. Until an aircraft's model is ready —
+/// meshes and textures included — its planes show the placeholder airframe
+/// instead of flying invisible (in the browser the models take a while);
+/// once it is, they switch to it. A model that failed to load (its `.glb`
+/// is missing, or needs a glTF extension Bevy lacks) is dropped for good.
+fn settle_models(
     server: Res<AssetServer>,
     mut assets: ResMut<PlaneAssets>,
     planes: Query<(&Aircraft, &Children)>,
     mut models: Query<(&AirframeModel, &mut Visibility)>,
+    mut settled: Local<bool>,
 ) {
-    let failed = |scene: &Option<Handle<WorldAsset>>| {
-        scene
-            .as_ref()
-            .is_some_and(|handle| server.load_state(handle.id()).is_failed())
-    };
-    if !assets.scenes.iter().any(failed) {
+    if *settled {
         return;
     }
-    for (index, scene) in assets.scenes.iter_mut().enumerate() {
-        if failed(scene) {
+    let (mut changed, mut pending) = (false, false);
+    for (index, slot) in assets
+        .bypass_change_detection()
+        .scenes
+        .iter_mut()
+        .enumerate()
+    {
+        let Some(model) = slot.as_mut().filter(|model| !model.ready) else {
+            continue;
+        };
+        let id = model.scene.id();
+        if server.load_state(id).is_failed() {
             let name = aces_protocol::aircraft(index as u8).name;
             warn!("the {name} model did not load; showing the placeholder airframe");
-            *scene = None;
+            *slot = None;
+            changed = true;
+        } else if server.load_state(id).is_loaded()
+            && !server.recursive_dependency_load_state(id).is_loading()
+        {
+            // Loaded — or a texture failed (logged), which shouldn't hide
+            // the whole model.
+            debug!(
+                aircraft = aces_protocol::aircraft(index as u8).name,
+                "model ready"
+            );
+            model.ready = true;
+            changed = true;
+        } else {
+            pending = true;
         }
     }
-    for (aircraft, children) in &planes {
-        show_model(children, assets.shown(aircraft.index), &mut models);
+    if changed {
+        assets.set_changed();
+        for (aircraft, children) in &planes {
+            show_model(children, assets.shown(aircraft.index), &mut models);
+        }
     }
+    *settled = !pending;
 }
 
 /// Per-model corrections for the glTF airframes: the Sketchfab exports face
@@ -527,24 +563,49 @@ fn drop_missing_models(
 fn model_fixup(index: u8) -> Transform {
     match index {
         // F-15E: nose +X, 194 units long → yaw +90°, 1/10, recentre.
-        1 => Transform {
-            translation: Vec3::new(0.0, -0.98, 4.51),
-            rotation: Quat::from_rotation_y(core::f32::consts::FRAC_PI_2),
-            scale: Vec3::splat(0.1),
-        },
+        1 => fixup(Vec3::new(0.0, -0.98, 4.51), FRAC_PI_2, 0.1),
         // F/A-141F: nose -X, 1177 units long → yaw -90°, ~1/62, recentre.
-        2 => Transform {
-            translation: Vec3::new(-14.66, 0.0, -0.04),
-            rotation: Quat::from_rotation_y(-core::f32::consts::FRAC_PI_2),
-            scale: Vec3::splat(0.016),
-        },
+        2 => fixup(Vec3::new(-14.66, 0.0, -0.04), -FRAC_PI_2, 0.016),
         // MiG-19: nose -Z already, ~2.2× too big → no yaw, 0.45, recentre.
-        3 => Transform {
-            translation: Vec3::new(0.0, -0.63, -1.44),
-            rotation: Quat::IDENTITY,
-            scale: Vec3::splat(0.45),
-        },
+        3 => fixup(Vec3::new(0.0, -0.63, -1.44), 0.0, 0.45),
+        // MiG-23MLD: nose +Z, 4.38 units long → yaw 180°, ×3.81 (16.7 m).
+        4 => fixup(Vec3::new(-15.82, -2.11, -2.95), PI, 3.811),
+        // Gripen: nose -X, already in meters (14.1 m) → yaw -90°.
+        5 => fixup(Vec3::new(0.0, 0.04, 0.0), -FRAC_PI_2, 1.0),
+        // T-38: nose -X, already in meters (14.0 m) → yaw -90°.
+        6 => fixup(Vec3::new(0.0, 0.0, -0.04), -FRAC_PI_2, 1.0),
+        // Su-25: nose +Z, 319 units long → yaw 180°, ×0.048 (15.3 m).
+        7 => fixup(Vec3::new(0.0, -2.23, -0.41), PI, 0.048),
+        // MiG-21: nose -X, in meters (14.8 m with probe) but parked far
+        // from the origin → yaw -90°, recentre.
+        8 => fixup(Vec3::new(-46.0, -1.99, 31.98), -FRAC_PI_2, 1.0),
+        // F-14: nose +Z, 2 units long → yaw 180°, ×9.55 (19.1 m).
+        9 => fixup(Vec3::ZERO, PI, 9.55),
+        // F-16C: nose -Z, 9.14 units long and 11 up → ×1.648 (15.1 m).
+        10 => fixup(Vec3::new(0.01, -17.85, 1.33), 0.0, 1.648),
+        // Eurofighter: nose +Z, 162 units long → yaw 180°, ×0.0986 (16 m).
+        11 => fixup(Vec3::new(0.0, -2.23, -0.27), PI, 0.0986),
+        // SR-71: nose +X, 29.2 units long → yaw +90°, ×1.122 (32.7 m).
+        12 => fixup(Vec3::new(0.0, -3.09, -0.31), FRAC_PI_2, 1.1217),
+        // MiG-15: nose +Z, 15.6 units long → yaw 180°, ×0.645 (10.1 m).
+        13 => fixup(Vec3::new(0.0, -1.84, -1.66), PI, 0.6445),
+        // F-5: nose -Z, 0.125 units long → ×115 (14.4 m).
+        14 => fixup(Vec3::new(0.12, -2.88, 0.12), 0.0, 115.0),
+        // Super Étendard: nose -X, already in meters (14.3 m) → yaw -90°.
+        15 => fixup(Vec3::new(0.0, 0.07, 0.0), -FRAC_PI_2, 1.0),
+        // Su-47: nose +Z, 24.5 units long → yaw 180°, ×0.923 (22.6 m).
+        16 => fixup(Vec3::new(0.0, -1.03, 0.86), PI, 0.9229),
         _ => Transform::default(),
+    }
+}
+
+/// A model fixup: yaw by `yaw`, scale uniformly by `scale`, then move by
+/// `translation`.
+fn fixup(translation: Vec3, yaw: f32, scale: f32) -> Transform {
+    Transform {
+        translation,
+        rotation: Quat::from_rotation_y(yaw),
+        scale: Vec3::splat(scale),
     }
 }
 
@@ -576,7 +637,7 @@ fn spawn_airframe(
         placeholder(),
         Mesh3d(assets.fuselage.clone()),
         MeshMaterial3d(fuselage.clone()),
-        Transform::from_rotation(Quat::from_rotation_x(core::f32::consts::FRAC_PI_2)),
+        Transform::from_rotation(Quat::from_rotation_x(FRAC_PI_2)),
     ));
     // Main wings.
     parent.spawn((
@@ -652,13 +713,13 @@ fn spawn_airframe(
         });
 
     // ── glTF models ─────────────────────────────────────────────────────────
-    for (index, scene) in assets.scenes.iter().enumerate() {
-        let Some(scene) = scene else { continue };
+    for (index, model) in assets.scenes.iter().enumerate() {
+        let Some(model) = model else { continue };
         let index = index as u8;
         parent.spawn((
             AirframeModel(index),
             model_fixup(index),
-            WorldAssetRoot(scene.clone()),
+            WorldAssetRoot(model.scene.clone()),
             visible(index),
         ));
     }
@@ -703,9 +764,16 @@ fn despawn_planes(
 mod tests {
     use super::*;
 
-    /// Aircraft whose model is missing show the placeholder, not nothing.
+    /// Aircraft whose model is missing — or still loading — show the
+    /// placeholder, not nothing.
     #[test]
     fn missing_models_show_the_placeholder() {
+        let model = |ready| {
+            Some(PlaneModel {
+                scene: default(),
+                ready,
+            })
+        };
         let assets = PlaneAssets {
             fuselage: default(),
             wing: default(),
@@ -717,11 +785,12 @@ mod tests {
             surface_material: default(),
             local_fuselage: default(),
             local_accent: default(),
-            scenes: vec![None, Some(default()), None],
+            scenes: vec![None, model(true), model(false), None],
         };
         assert_eq!(assets.shown(0), 0);
         assert_eq!(assets.shown(1), 1, "a loaded model is shown");
-        assert_eq!(assets.shown(2), 0, "a missing model falls back");
+        assert_eq!(assets.shown(2), 0, "a loading model falls back meanwhile");
+        assert_eq!(assets.shown(3), 0, "a missing model falls back");
         assert_eq!(assets.shown(9), 0, "an unknown aircraft falls back");
     }
     use bevy::input::InputPlugin;

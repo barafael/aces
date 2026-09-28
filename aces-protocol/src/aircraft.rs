@@ -178,6 +178,20 @@ const CC_BY_NC_SA_4: (&str, &str) = (
     "https://creativecommons.org/licenses/by-nc-sa/4.0/",
 );
 
+/// The other models' license.
+const CC_BY_4: (&str, &str) = ("CC BY 4.0", "https://creativecommons.org/licenses/by/4.0/");
+
+/// A CC BY 4.0 model from Sketchfab.
+const fn cc_by(title: &'static str, author: &'static str, source: &'static str) -> Option<Credit> {
+    Some(Credit {
+        title,
+        author,
+        source,
+        license: CC_BY_4.0,
+        license_url: CC_BY_4.1,
+    })
+}
+
 /// The placeholder jet everything was tuned on: a ~16 m span fighter,
 /// 1 g stall ~206 km/h, ~1020 km/h dry / ~1080 km/h with afterburner.
 pub const PLACEHOLDER_JET: Airframe = Airframe {
@@ -234,7 +248,7 @@ pub const PLACEHOLDER_JET: Airframe = Airframe {
 /// The selectable aircraft, indexed by [`crate::PlayerInfo::aircraft`].
 /// Every airframe is still the placeholder jet — the models arrived before
 /// their numbers did; split the airframes as each plane gets tuned.
-pub const AIRCRAFT: [AircraftType; 4] = [
+pub const AIRCRAFT: [AircraftType; 17] = [
     AircraftType {
         name: "Jet (placeholder)",
         airframe: PLACEHOLDER_JET,
@@ -269,13 +283,141 @@ pub const AIRCRAFT: [AircraftType; 4] = [
         name: "MiG-19",
         airframe: PLACEHOLDER_JET,
         model: Some("models/mikoyan-gurevich_mig-19.glb"),
-        credit: Some(Credit {
-            title: "Mikoyan-gurevich mig-19",
-            author: "Chenchanchong",
-            source: "https://sketchfab.com/3d-models/mikoyan-gurevich-mig-19-056bde58c01345c59793aaac7e1764bc",
-            license: "CC BY 4.0",
-            license_url: "https://creativecommons.org/licenses/by/4.0/",
-        }),
+        credit: cc_by(
+            "Mikoyan-gurevich mig-19",
+            "Chenchanchong",
+            "https://sketchfab.com/3d-models/mikoyan-gurevich-mig-19-056bde58c01345c59793aaac7e1764bc",
+        ),
+    },
+    AircraftType {
+        name: "MiG-23MLD",
+        airframe: PLACEHOLDER_JET,
+        model: Some("models/mig-23_mld.glb"),
+        credit: cc_by(
+            "Mig-23 MLD",
+            "Tim Samedov (citizensnip)",
+            "https://sketchfab.com/3d-models/mig-23-mld-7a13c91f07e042a685b4d265644fdc06",
+        ),
+    },
+    AircraftType {
+        name: "JAS 39 Gripen",
+        airframe: PLACEHOLDER_JET,
+        model: Some("models/jas39_gripen.glb"),
+        credit: cc_by(
+            "JAS39  Gripen",
+            "helijah",
+            "https://sketchfab.com/3d-models/jas39-gripen-a2b70c2f92af45d18d95f02b60621dbf",
+        ),
+    },
+    AircraftType {
+        name: "T-38 Talon",
+        airframe: PLACEHOLDER_JET,
+        model: Some("models/northrop_t-38_talon.glb"),
+        credit: cc_by(
+            "Northrop T-38 Talon",
+            "helijah",
+            "https://sketchfab.com/3d-models/northrop-t-38-talon-d5d22b4b37944f0e9bb1e77ede028f2f",
+        ),
+    },
+    AircraftType {
+        name: "Su-25",
+        airframe: PLACEHOLDER_JET,
+        model: Some("models/su-25.glb"),
+        credit: cc_by(
+            "Su-25",
+            "tnikita",
+            "https://sketchfab.com/3d-models/su-25-88b71eb848cf4418a95dff497c07cefc",
+        ),
+    },
+    AircraftType {
+        name: "MiG-21",
+        airframe: PLACEHOLDER_JET,
+        model: Some("models/mig-21_fishbed_-_cold_war_era_fighter_-_free.glb"),
+        credit: cc_by(
+            "MIG-21 Fishbed - cold war era fighter - free",
+            "NETRUNNER_pl",
+            "https://sketchfab.com/3d-models/mig-21-fishbed-cold-war-era-fighter-free-18927e007c3b47ed9e676f88b4adb578",
+        ),
+    },
+    AircraftType {
+        name: "F-14 Tomcat",
+        airframe: PLACEHOLDER_JET,
+        model: Some("models/f-14_tomcat.glb"),
+        credit: cc_by(
+            "F-14 TOMCAT",
+            "Ryan.Qin",
+            "https://sketchfab.com/3d-models/f-14-tomcat-082e081ecea94a6aaa8c7bb72ec9136b",
+        ),
+    },
+    AircraftType {
+        name: "F-16C Fighting Falcon",
+        airframe: PLACEHOLDER_JET,
+        model: Some("models/f16-c_falcon.glb"),
+        credit: cc_by(
+            "F16-C Falcon",
+            "Carlos.Maciel",
+            "https://sketchfab.com/3d-models/f16-c-falcon-4bc2ff75dc584af2afd0aa6bd8b79015",
+        ),
+    },
+    AircraftType {
+        name: "Eurofighter Typhoon",
+        airframe: PLACEHOLDER_JET,
+        model: Some("models/eurofighter_typhoon_game_prop.glb"),
+        credit: cc_by(
+            "Eurofighter Typhoon Game Prop",
+            "robnewman76",
+            "https://sketchfab.com/3d-models/eurofighter-typhoon-game-prop-01d9a26a89dc4a17a9fa4c4c1f7ac39f",
+        ),
+    },
+    AircraftType {
+        name: "SR-71 Blackbird",
+        airframe: PLACEHOLDER_JET,
+        model: Some("models/lockheed_sr-71_blackbird.glb"),
+        credit: cc_by(
+            "Lockheed SR-71 \"Blackbird\"",
+            "KOG_THORNS (ioai25312)",
+            "https://sketchfab.com/3d-models/lockheed-sr-71-blackbird-e2400e6119f5414c89e075654a82d30a",
+        ),
+    },
+    AircraftType {
+        name: "MiG-15",
+        airframe: PLACEHOLDER_JET,
+        model: Some("models/mig-15.glb"),
+        credit: cc_by(
+            "Mig-15",
+            "Vermishel",
+            "https://sketchfab.com/3d-models/mig-15-db02d092b7a344339a3e60d2dc0f6f39",
+        ),
+    },
+    AircraftType {
+        name: "F-5 Freedom Fighter",
+        airframe: PLACEHOLDER_JET,
+        model: Some("models/northrop_f-5_freedom_fighter.glb"),
+        credit: cc_by(
+            "Northrop F-5 Freedom Fighter",
+            "Pan_Ar4ik (rave.Ar4ik)",
+            "https://sketchfab.com/3d-models/northrop-f-5-freedom-fighter-8074c87c10fa47ef909bac55d21cc789",
+        ),
+    },
+    AircraftType {
+        name: "Super Étendard",
+        airframe: PLACEHOLDER_JET,
+        model: Some("models/super-etendard.glb"),
+        credit: cc_by(
+            "super-etendard",
+            "helijah",
+            "https://sketchfab.com/3d-models/super-etendard-3589004316f54dba90ed7f34455eeeb2",
+        ),
+    },
+    AircraftType {
+        name: "Su-47 Berkut",
+        airframe: PLACEHOLDER_JET,
+        model: Some("models/su-47_berkut.glb"),
+        credit: cc_by(
+            "Su-47 Berkut",
+            "Carlos.Maciel",
+            "https://sketchfab.com/3d-models/su-47-berkut-4a2b1cecf13c4c9db7933ffd7fd67339",
+        ),
     },
 ];
 

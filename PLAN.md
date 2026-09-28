@@ -120,8 +120,8 @@ the raw mouse events (to tune sensitivity/leveling too).
 ## Aircraft
 
 Aircraft are data: `aces-protocol/src/aircraft.rs` holds the registry
-`AIRCRAFT` (name + `Airframe`), selectable in the lobby (number keys, shown
-when there is more than one). An `Airframe` carries every number the flight
+`AIRCRAFT` (name + `Airframe`), selectable in the lobby (`←`/`→` cycle,
+shown when there is more than one). An `Airframe` carries every number the flight
 model and instructor read — aerodynamics (wing loading, lift curve, stall,
 drag polar, wave drag), engine (jet/propeller, dry and boost thrust, thrust
 lapse with speed and density, spool rates), control response (pitch/yaw
@@ -141,19 +141,28 @@ sustained turn), and add it to `test_airframes` if it opens new territory —
 small offsets without rocking, 90° turn, G/AoA protection, stall recovery,
 tail slide) on each. Flight logs record the airframe at spawn; `replay`
 re-flies with the aircraft's current definition and lists what changed
-(`--recorded-airframe` flies the logged one). The three real models
-(F-15E, F/A-141F, MiG-19) live in `aces-client/assets/models`, stored with
-Git LFS (`*.glb`, ~85 MB of Sketchfab exports — install git-lfs before
-cloning, or run `git lfs pull` after). An aircraft whose model is missing
+(`--recorded-airframe` flies the logged one). The sixteen real models
+(F-15E, F/A-141F, MiG-19, MiG-23MLD, Gripen, T-38, Su-25, MiG-21, F-14,
+F-16C, Eurofighter, SR-71, MiG-15, F-5, Super Étendard, Su-47) live in
+`aces-client/assets/models`, stored with Git LFS (`*.glb`, ~140 MB of
+Sketchfab exports — install git-lfs before cloning, or run `git lfs pull`
+after). An aircraft whose model is missing
 flies the placeholder airframe.
 Third-party models are credited per their licenses (two CC BY-NC-SA 4.0 —
-non-commercial —, one CC BY 4.0): each `AIRCRAFT` entry carries its
-`Credit`, shown on the main menu's credits screen (`K`) and listed in
-`CREDITS.md` (with the font); a test keeps the three in sync.
+non-commercial —, the rest CC BY 4.0): each `AIRCRAFT` entry carries its
+`Credit`, shown on the main menu's credits screen (`K`, `←`/`→` turn its
+pages) and listed in `CREDITS.md` (with the font); a test keeps the three
+in sync.
 Their airframes still fly as the placeholder jet, and `P` cycles the
 displayed model in flight. The client keeps per-model scale/orientation
 fixups (`flight::model_fixup`) — the Sketchfab exports face arbitrary
-axes, are wildly off scale and are not centered.
+axes, are wildly off scale and are not centered. To add one: measure the
+world-space vertex bounding box of the glTF's default scene (node
+transforms applied), find the nose (the fin is at the tail), yaw it onto
+-Z, scale the length to the real aircraft's and move the scaled, yawed
+bounding-box centre to the origin. Check the Sketchfab download before
+adding it: some are posed (banked, pitched), are whole scenes, or need
+`KHR_materials_pbrSpecularGlossiness`, which bevy_gltf refuses to load.
 
 ### glb export recipe (verified against bevy_gltf 0.19)
 

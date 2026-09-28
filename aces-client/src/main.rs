@@ -36,10 +36,13 @@ pub enum NetworkMode {
 #[derive(Resource, Default, Debug, Clone)]
 pub struct AutoRoom(pub Option<String>);
 
-/// Asset folder for [`AssetPlugin`]: absolute in dev builds (binaries run
-/// from any directory still find the repo assets), portable in release.
+/// Asset folder for [`AssetPlugin`]: absolute in native dev builds (binaries
+/// run from any directory still find the repo assets), relative otherwise.
+/// Never absolute on the web: the browser fetches assets over HTTP next to
+/// the page, and a filesystem path there fails every load (trunk answers it
+/// with the index page).
 fn asset_root() -> String {
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
     if let Some(dir) = option_env!("CARGO_MANIFEST_DIR") {
         return format!("{dir}/assets");
     }
