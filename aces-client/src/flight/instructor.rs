@@ -605,15 +605,15 @@ mod tests {
         }
     }
 
-    /// The instructor's core behaviors on every test airframe, each at a
-    /// cruise speed scaled to its own stall speed: holds level, settles
-    /// small offsets without rocking, turns onto a 90° offset, and keeps
-    /// the G and AoA limits of that airframe.
+    /// The instructor's core behaviors on every test airframe and every
+    /// registered aircraft, each at a cruise speed scaled to its own stall
+    /// speed: holds level, settles small offsets without rocking, turns
+    /// onto a 90° offset, and keeps the G and AoA limits of that airframe.
     #[test]
     fn every_airframe_flies_the_same_way() {
         use crate::flight::model::test_airframes;
         let sigma_5000 = crate::flight::model::density_ratio(5000.0);
-        for (name, a) in test_airframes::all() {
+        for (name, a) in test_airframes::and_registry() {
             // True airspeed ~3× the local 1 g stall speed.
             let cruise_speed = 3.0 * a.stall_speed() / sigma_5000.sqrt();
             let fly_on = |aim: Vec3, speed: f32, seconds: f32| -> (Flight, f32, usize) {

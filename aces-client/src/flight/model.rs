@@ -478,6 +478,13 @@ pub mod test_airframes {
     use aces_protocol::Engine;
     use aces_protocol::aircraft::PLACEHOLDER_JET as JET;
 
+    /// The test airframes followed by every registered aircraft: what the
+    /// flight model and instructor batteries run on.
+    pub fn and_registry() -> Vec<(&'static str, Airframe)> {
+        let registry = aces_protocol::AIRCRAFT.iter().map(|k| (k.name, k.airframe));
+        all().into_iter().chain(registry).collect()
+    }
+
     pub fn all() -> Vec<(&'static str, Airframe)> {
         vec![
             ("jet", JET),
@@ -866,8 +873,18 @@ mod tests {
     #[ignore]
     fn performance_report() {
         println!(
-            "{:<22} {:>6} {:>6} {:>6} {:>6} {:>7} {:>7}",
-            "aircraft [km/h, deg/s]", "stall", "top", "boost", "roll", "turn", "turn+"
+            "{:<22} {:>6} {:>6} {:>6} {:>6} {:>7} {:>7} {:>6} {:>6} {:>7} {:>5}",
+            "aircraft [km/h, deg/s]",
+            "stall",
+            "top",
+            "boost",
+            "roll",
+            "turn",
+            "turn+",
+            "inst",
+            "corner",
+            "climb+",
+            "g"
         );
         let registry = aces_protocol::AIRCRAFT.iter().map(|k| (k.name, k.airframe));
         let variants = test_airframes::all();
@@ -897,8 +914,25 @@ mod tests {
                 let n = (q * cl / GRAVITY).min(a.g_limit);
                 ((n * n - 1.0).max(0.0).sqrt() * GRAVITY / 150.0).to_degrees()
             };
+            // Instantaneous turn at 150 m/s (protected AoA or G limit), and
+            // the corner speed where the two meet.
+            let n_inst = (q * cl_protected / GRAVITY).min(a.g_limit);
+            let instantaneous =
+                ((n_inst * n_inst - 1.0).max(0.0).sqrt() * GRAVITY / 150.0).to_degrees();
+            let corner = (a.g_limit * GRAVITY / (a.aero_k * cl_protected)).sqrt();
+            // Best sea-level climb rate with boost [m/s]: specific excess
+            // power in 1 g flight, over the speed range.
+            let climb = (80..400)
+                .step_by(5)
+                .map(|v| {
+                    let v = v as f32;
+                    let cl = GRAVITY / (a.aero_k * v * v);
+                    let cd = drag_curve(&a, cl, 0.0, a.alpha_for_lift(cl), 0.0, v / SPEED_OF_SOUND);
+                    v * (thrust(&a, THROTTLE_MAX, 1.0, v) - a.aero_k * v * v * cd) / GRAVITY
+                })
+                .fold(f32::MIN, f32::max);
             println!(
-                "{:<22} {:>6.0} {:>6.0} {:>6.0} {:>6.0} {:>7.1} {:>7.1}",
+                "{:<22} {:>6.0} {:>6.0} {:>6.0} {:>6.0} {:>7.1} {:>7.1} {:>6.1} {:>6.0} {:>7.0} {:>5.1}",
                 name,
                 a.stall_speed() * 3.6,
                 top_speed(&a, 1.0) * 3.6,
@@ -906,6 +940,10 @@ mod tests {
                 state.omega.roll.to_degrees(),
                 sustained(1.0),
                 sustained(THROTTLE_MAX),
+                instantaneous,
+                corner * 3.6,
+                climb,
+                a.g_limit,
             );
         }
         println!("\nheld stall, placeholder jet:");
@@ -937,11 +975,11 @@ mod tests {
         }
     }
 
-    /// Every airframe stalls under an unprotected full pull, recovers
-    /// hands-off, and survives a tail slide.
+    /// Every test airframe and registered aircraft stalls under an
+    /// unprotected full pull, recovers hands-off, and survives a tail slide.
     #[test]
     fn every_airframe_stalls_and_recovers() {
-        for (name, a) in test_airframes::all() {
+        for (name, a) in test_airframes::and_registry() {
             let speed = 2.0 * a.stall_speed();
             let mut state =
                 FlightState::new(Vec3::new(0.0, 3000.0, 0.0), Quat::IDENTITY, speed, 1.0);

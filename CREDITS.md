@@ -7,9 +7,12 @@ menu → `K`).
 ## Aircraft models
 
 All from [Sketchfab](https://sketchfab.com), in `aces-client/assets/models/`
-(stored with Git LFS). The model files are used as downloaded, except the
-MiG-21 (see below); the game scales, rotates and re-centres them when
-loading (`flight::model_fixup`).
+(stored with Git LFS). The downloads are kept in `art/models` (as
+downloaded, except the MiG-21 — see below); the game ships versions
+re-exported by `tools/rig`: scaled, rotated and re-centred, with the
+control surfaces, landing gear and doors cut into separate hinged parts so
+they animate, and nozzle markers added. Geometry and textures are
+otherwise unchanged.
 
 | Model | Author | License |
 |---|---|---|

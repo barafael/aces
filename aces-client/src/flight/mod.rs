@@ -32,6 +32,7 @@ pub mod model;
 pub mod recorder;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod replay;
+pub mod rig;
 
 #[cfg(not(target_arch = "wasm32"))]
 /// Every tuning constant of the flight stack, by name.
@@ -49,7 +50,7 @@ use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
 
 use aces_net::NetState;
 use aces_protocol::{PlaneSnapshot, spawn_point};
-use core::f32::consts::{FRAC_PI_2, PI};
+use core::f32::consts::FRAC_PI_2;
 use std::collections::VecDeque;
 
 use self::input::{FlightInput, FreeLook, MouseAim};
@@ -64,7 +65,8 @@ impl Plugin for FlightPlugin {
         app.add_plugins(recorder::RecorderPlugin {
             dir: recorder::log_dir_from_env(),
         });
-        app.init_resource::<FlightInput>()
+        app.add_plugins(rig::RigPlugin)
+            .init_resource::<FlightInput>()
             .init_resource::<FreeLook>()
             .init_resource::<MouseAim>()
             .add_systems(Startup, init_plane_assets)
@@ -104,14 +106,16 @@ pub struct SpawnSet;
 #[derive(Component, Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Life(pub u32);
 
-/// Which aircraft type a plane is, with its flight characteristics. On
-/// every plane: the local one flies on the airframe, remote ones will pick
-/// their model by it (milestone 6).
+/// Which aircraft type a plane is, with its flight characteristics and
+/// combat stores. On every plane: the local one flies on the airframe and
+/// fights with the combat numbers, remote ones pick their model and hit
+/// points by it.
 #[derive(Component, Clone, Copy, Debug)]
 pub struct Aircraft {
     /// Index into [`aces_protocol::AIRCRAFT`].
     pub index: u8,
     pub airframe: aces_protocol::Airframe,
+    pub combat: aces_protocol::Combat,
 }
 
 impl Aircraft {
@@ -125,6 +129,7 @@ impl Aircraft {
                 0
             },
             airframe: kind.airframe,
+            combat: kind.combat,
         }
     }
 
@@ -388,7 +393,7 @@ fn spawn_local(
             Life::default(),
             aircraft,
             state,
-            crate::weapons::Health::full(),
+            crate::weapons::Health::full(&aircraft.combat),
             Instructor::default(),
             SimPose::new(pos, quat),
             Velocity(state.vel),
@@ -446,7 +451,7 @@ fn spawn_remote(
                 peer: peer.to_string(),
                 history: VecDeque::new(),
             },
-            crate::weapons::Health::full(),
+            crate::weapons::Health::full(&aircraft.combat),
             aircraft,
             Surfaces::default(),
             Transform::from_translation(pos.into()).with_rotation(quat),
@@ -464,23 +469,45 @@ fn spawn_remote(
 #[derive(Component, Clone, Copy)]
 struct AirframeModel(u8);
 
-/// `P` cycles the local plane through every aircraft. All airframes fly
-/// identically right now, so this is purely visual (the HUD name follows
-/// the swapped type).
+/// `P` switches the local plane to the next aircraft type, solo only: the
+/// new airframe takes over the current flight (a new [`Life`], so the
+/// flight log starts a new segment), with the new type's full hit points
+/// and stores. Solo keeps the choice for the next flight. Over the network
+/// the other peers only know the lobby's choice, so there it does nothing.
+#[allow(clippy::type_complexity)]
 fn cycle_aircraft(
     keys: Res<ButtonInput<KeyCode>>,
+    mode: Res<crate::NetworkMode>,
     assets: Res<PlaneAssets>,
-    mut planes: Query<(&mut Aircraft, &Children), With<LocalPlane>>,
+    mut net: ResMut<NetState>,
+    mut loadout: ResMut<crate::weapons::Loadout>,
+    mut planes: Query<
+        (
+            &mut Aircraft,
+            &mut Life,
+            &mut crate::weapons::Health,
+            &Children,
+        ),
+        With<LocalPlane>,
+    >,
     mut models: Query<(&AirframeModel, &mut Visibility)>,
 ) {
-    if !keys.just_pressed(KeyCode::KeyP) {
+    if !keys.just_pressed(KeyCode::KeyP) || *mode != crate::NetworkMode::Solo {
         return;
     }
-    let Ok((mut aircraft, children)) = planes.single_mut() else {
+    let Ok((mut aircraft, mut life, mut health, children)) = planes.single_mut() else {
         return;
     };
-    aircraft.index = (aircraft.index + 1) % aces_protocol::AIRCRAFT_COUNT;
-    show_model(children, assets.shown(aircraft.index), &mut models);
+    if !health.alive() {
+        return;
+    }
+    let next = (aircraft.index + 1) % aces_protocol::AIRCRAFT_COUNT;
+    *aircraft = Aircraft::of_type(next);
+    life.0 += 1;
+    *health = crate::weapons::Health::full(&aircraft.combat);
+    loadout.restock(&aircraft.combat);
+    net.aircraft = next;
+    show_model(children, assets.shown(next), &mut models);
 }
 
 /// Make exactly airframe variant `shown` visible among a plane's
@@ -553,60 +580,6 @@ fn settle_models(
         }
     }
     *settled = !pending;
-}
-
-/// Per-model corrections for the glTF airframes: the Sketchfab exports face
-/// arbitrary axes, are wildly off scale and are not centered. The rotation
-/// aims the nose along -Z (the airframe convention), the scale brings the
-/// model to its real-world meters, the translation centers the pivot on
-/// the fuselage (values measured from the vertex bounding boxes).
-fn model_fixup(index: u8) -> Transform {
-    match index {
-        // F-15E: nose +X, 194 units long → yaw +90°, 1/10, recentre.
-        1 => fixup(Vec3::new(0.0, -0.98, 4.51), FRAC_PI_2, 0.1),
-        // F/A-141F: nose -X, 1177 units long → yaw -90°, ~1/62, recentre.
-        2 => fixup(Vec3::new(-14.66, 0.0, -0.04), -FRAC_PI_2, 0.016),
-        // MiG-19: nose -Z already, ~2.2× too big → no yaw, 0.45, recentre.
-        3 => fixup(Vec3::new(0.0, -0.63, -1.44), 0.0, 0.45),
-        // MiG-23MLD: nose +Z, 4.38 units long → yaw 180°, ×3.81 (16.7 m).
-        4 => fixup(Vec3::new(-15.82, -2.11, -2.95), PI, 3.811),
-        // Gripen: nose -X, already in meters (14.1 m) → yaw -90°.
-        5 => fixup(Vec3::new(0.0, 0.04, 0.0), -FRAC_PI_2, 1.0),
-        // T-38: nose -X, already in meters (14.0 m) → yaw -90°.
-        6 => fixup(Vec3::new(0.0, 0.0, -0.04), -FRAC_PI_2, 1.0),
-        // Su-25: nose +Z, 319 units long → yaw 180°, ×0.048 (15.3 m).
-        7 => fixup(Vec3::new(0.0, -2.23, -0.41), PI, 0.048),
-        // MiG-21: nose -X, in meters (14.8 m with probe) but parked far
-        // from the origin → yaw -90°, recentre.
-        8 => fixup(Vec3::new(-46.0, -1.99, 31.98), -FRAC_PI_2, 1.0),
-        // F-14: nose +Z, 2 units long → yaw 180°, ×9.55 (19.1 m).
-        9 => fixup(Vec3::ZERO, PI, 9.55),
-        // F-16C: nose -Z, 9.14 units long and 11 up → ×1.648 (15.1 m).
-        10 => fixup(Vec3::new(0.01, -17.85, 1.33), 0.0, 1.648),
-        // Eurofighter: nose +Z, 162 units long → yaw 180°, ×0.0986 (16 m).
-        11 => fixup(Vec3::new(0.0, -2.23, -0.27), PI, 0.0986),
-        // SR-71: nose +X, 29.2 units long → yaw +90°, ×1.122 (32.7 m).
-        12 => fixup(Vec3::new(0.0, -3.09, -0.31), FRAC_PI_2, 1.1217),
-        // MiG-15: nose +Z, 15.6 units long → yaw 180°, ×0.645 (10.1 m).
-        13 => fixup(Vec3::new(0.0, -1.84, -1.66), PI, 0.6445),
-        // F-5: nose -Z, 0.125 units long → ×115 (14.4 m).
-        14 => fixup(Vec3::new(0.12, -2.88, 0.12), 0.0, 115.0),
-        // Super Étendard: nose -X, already in meters (14.3 m) → yaw -90°.
-        15 => fixup(Vec3::new(0.0, 0.07, 0.0), -FRAC_PI_2, 1.0),
-        // Su-47: nose +Z, 24.5 units long → yaw 180°, ×0.923 (22.6 m).
-        16 => fixup(Vec3::new(0.0, -1.03, 0.86), PI, 0.9229),
-        _ => Transform::default(),
-    }
-}
-
-/// A model fixup: yaw by `yaw`, scale uniformly by `scale`, then move by
-/// `translation`.
-fn fixup(translation: Vec3, yaw: f32, scale: f32) -> Transform {
-    Transform {
-        translation,
-        rotation: Quat::from_rotation_y(yaw),
-        scale: Vec3::splat(scale),
-    }
 }
 
 /// Every displayed airframe variant (the procedural placeholder with its
@@ -718,7 +691,9 @@ fn spawn_airframe(
         let index = index as u8;
         parent.spawn((
             AirframeModel(index),
-            model_fixup(index),
+            // The rig pipeline (tools/rig) exports every model in airframe
+            // space already: meters, nose -Z, centred.
+            Transform::default(),
             WorldAssetRoot(model.scene.clone()),
             visible(index),
         ));

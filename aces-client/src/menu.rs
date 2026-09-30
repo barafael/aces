@@ -199,6 +199,7 @@ fn auto_enter_lobby(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_menu(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
@@ -207,6 +208,7 @@ fn update_menu(
     mut draft: ResMut<JoinDraft>,
     mut next: ResMut<NextState<Phase>>,
     auto_room: Res<crate::AutoRoom>,
+    mut net: ResMut<NetState>,
 ) {
     if draft.active {
         for event in key_events.read() {
@@ -244,6 +246,8 @@ fn update_menu(
                 }
             }
         }
+    } else if let Some(step) = aircraft_step(&keys) {
+        net.aircraft = (net.aircraft + step) % AIRCRAFT_COUNT;
     } else if keys.just_pressed(KeyCode::KeyF) {
         info!("flying solo");
         *mode = NetworkMode::Solo;
@@ -257,6 +261,27 @@ fn update_menu(
         draft.text = auto_room.0.clone().unwrap_or_default();
         draft.error = None;
     }
+}
+
+/// `←`/`→` step through the aircraft (as an offset to add, modulo the
+/// count), in the main menu and the lobby.
+fn aircraft_step(keys: &ButtonInput<KeyCode>) -> Option<u8> {
+    if keys.just_pressed(KeyCode::ArrowRight) {
+        Some(1)
+    } else if keys.just_pressed(KeyCode::ArrowLeft) {
+        Some(AIRCRAFT_COUNT - 1)
+    } else {
+        None
+    }
+}
+
+/// The aircraft choice line: "← / → — aircraft: MiG-21 (9/17)".
+fn aircraft_line(selected: u8) -> String {
+    format!(
+        "← / → — aircraft: {} ({}/{AIRCRAFT_COUNT})",
+        aircraft(selected).name,
+        selected + 1,
+    )
 }
 
 /// `K` opens and closes the credits screen (`Esc` closes it too), `←`/`→`
@@ -350,14 +375,7 @@ fn update_lobby(
     mut settle: Local<(f32, (usize, bool))>,
 ) {
     // Aircraft select re-greets, which is how the change propagates.
-    let step = if keys.just_pressed(KeyCode::ArrowRight) {
-        Some(1)
-    } else if keys.just_pressed(KeyCode::ArrowLeft) {
-        Some(AIRCRAFT_COUNT - 1)
-    } else {
-        None
-    };
-    if let Some(step) = step {
+    if let Some(step) = aircraft_step(&keys) {
         let aircraft = (net.aircraft + step) % AIRCRAFT_COUNT;
         if net.aircraft != aircraft {
             net.aircraft = aircraft;
@@ -468,10 +486,14 @@ fn update_ui_text(
                         .map(|e| format!("\n\n{e}"))
                         .unwrap_or_default()
                 )
-            } else if let Some(room) = &auto_room.0 {
-                format!("aces\n\nF — fly solo\nH — host {room}\nJ — join {room}\nK — credits")
             } else {
-                String::from("aces\n\nF — fly solo\nH — host a room\nJ — join a room\nK — credits")
+                let room = auto_room.0.as_deref();
+                format!(
+                    "aces\n\n{}\n\nF — fly solo\nH — host {}\nJ — join {}\nK — credits",
+                    aircraft_line(net.aircraft),
+                    room.unwrap_or("a room"),
+                    room.unwrap_or("a room"),
+                )
             };
             (text, None, false)
         }
@@ -507,11 +529,8 @@ fn update_ui_text(
             }
             lines.push('\n');
             if AIRCRAFT_COUNT > 1 {
-                lines.push_str(&format!(
-                    "← / → — aircraft: {} ({}/{AIRCRAFT_COUNT})\n",
-                    aircraft(net.aircraft).name,
-                    net.aircraft + 1,
-                ));
+                lines.push_str(&aircraft_line(net.aircraft));
+                lines.push('\n');
             }
             if net.is_host {
                 lines.push_str("Enter — start\n");

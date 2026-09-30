@@ -29,6 +29,7 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use aces_net::{CmKind, DamageCause, Ephemeral, GameEvent, MissileKind, NetState};
+use aces_protocol::Combat;
 use std::collections::{HashMap, VecDeque};
 use std::env;
 
@@ -42,22 +43,15 @@ use crate::{NetworkMode, Phase};
 
 // ── Tuning ──────────────────────────────────────────────────────────────────
 
-/// Health of a fresh plane.
-pub const MAX_HEALTH: f32 = 100.0;
-/// Damage per gun hit.
-pub const GUN_DAMAGE: f32 = 8.0;
-/// Gun shots per second.
-pub const GUN_RATE: f32 = 15.0;
+// Hit points, the gun's damage and rate, the missile stores and the radar
+// range are the aircraft's (`aces_protocol::Combat`).
+
 /// Gun effective range [m].
 pub const GUN_RANGE: f32 = 1500.0;
 /// A plane counts as hit within this radius of the ray [m].
 pub const HIT_SPHERE: f32 = 12.0;
 /// Damage per missile hit (both kinds).
 pub const MISSILE_DAMAGE: f32 = 60.0;
-/// Heat-seeker magazine.
-pub const IR_MISSILE_COUNT: u8 = 6;
-/// Radar missile magazine.
-pub const RADAR_MISSILE_COUNT: u8 = 4;
 /// The IR seeker: narrow and short-ranged.
 pub const IR_LOCK: LockSpec = LockSpec {
     cone: 10f32.to_radians(),
@@ -65,13 +59,22 @@ pub const IR_LOCK: LockSpec = LockSpec {
     range: 4000.0,
     time: 1.5,
 };
-/// The radar: a coarse, long-range cone around the nose.
+/// The radar: a coarse, long-range cone around the nose. Its range is the
+/// aircraft's ([`radar_lock`]).
 pub const RADAR_LOCK: LockSpec = LockSpec {
     cone: 30f32.to_radians(),
     drop_cone: 40f32.to_radians(),
     range: 8000.0,
     time: 2.0,
 };
+
+/// The radar lock of an aircraft with `combat`; `None` without a radar.
+pub fn radar_lock(combat: &Combat) -> Option<LockSpec> {
+    (combat.radar_range > 0.0).then_some(LockSpec {
+        range: combat.radar_range,
+        ..RADAR_LOCK
+    })
+}
 /// How often a held radar lock re-announces itself to the target [s].
 pub const RADAR_ANNOUNCE_PERIOD: f32 = 0.5;
 /// How long an announced radar lock shows on the target's RWR [s]: long
@@ -119,9 +122,10 @@ pub struct Health {
 }
 
 impl Health {
-    pub fn full() -> Self {
+    /// A fresh plane of an aircraft type with `combat`.
+    pub fn full(combat: &Combat) -> Self {
         Self {
-            hp: MAX_HEALTH,
+            hp: combat.hp,
             dead: false,
         }
     }
@@ -240,16 +244,21 @@ pub struct Loadout {
 
 impl Default for Loadout {
     fn default() -> Self {
-        Self {
-            ir_missiles: IR_MISSILE_COUNT,
-            radar_missiles: RADAR_MISSILE_COUNT,
-            respawn_in: None,
-            respawns: 0,
-        }
+        Self::new(&aces_protocol::aircraft::STANDARD_COMBAT)
     }
 }
 
 impl Loadout {
+    /// Full stores for an aircraft type with `combat`, flying.
+    pub fn new(combat: &Combat) -> Self {
+        Self {
+            ir_missiles: combat.ir_missiles,
+            radar_missiles: combat.radar_missiles,
+            respawn_in: None,
+            respawns: 0,
+        }
+    }
+
     /// Not shot down (or waiting to respawn).
     pub fn flying(&self) -> bool {
         self.respawn_in.is_none()
@@ -274,9 +283,10 @@ impl Loadout {
         taken
     }
 
-    fn restock(&mut self) {
-        self.ir_missiles = IR_MISSILE_COUNT;
-        self.radar_missiles = RADAR_MISSILE_COUNT;
+    /// Full missile stores of an aircraft type with `combat`.
+    pub fn restock(&mut self, combat: &Combat) {
+        self.ir_missiles = combat.ir_missiles;
+        self.radar_missiles = combat.radar_missiles;
     }
 }
 
@@ -552,9 +562,11 @@ fn init_weapon_assets(
     });
 }
 
-/// A fresh game (and leaving one) starts from full stores, no locks, no
-/// threats and an empty board.
+/// A fresh game (and leaving one) starts from full stores of the chosen
+/// aircraft, no locks, no threats and an empty board.
+#[allow(clippy::too_many_arguments)]
 fn rearm(
+    net: Res<NetState>,
     mut loadout: ResMut<Loadout>,
     mut locks: ResMut<Locks>,
     mut countermeasures: ResMut<Countermeasures>,
@@ -563,7 +575,7 @@ fn rearm(
     mut scoreboard: ResMut<Scoreboard>,
     mut kill_feed: ResMut<KillFeed>,
 ) {
-    *loadout = Loadout::default();
+    *loadout = Loadout::new(&aces_protocol::aircraft(net.aircraft).combat);
     *locks = Locks::default();
     *countermeasures = Countermeasures::default();
     *deployments = CmDeployments::default();
@@ -625,11 +637,12 @@ pub fn decoy_for(
 fn update_locks(
     net: Res<NetState>,
     loadout: Res<Loadout>,
-    plane: Single<&FlightState, With<LocalPlane>>,
+    plane: Single<(&FlightState, &Aircraft), With<LocalPlane>>,
     remotes: RemoteTargets,
     mut locks: ResMut<Locks>,
     time: Res<Time>,
 ) {
+    let (plane, aircraft) = *plane;
     if !loadout.flying() {
         if *locks != Locks::default() {
             *locks = Locks::default();
@@ -645,7 +658,10 @@ fn update_locks(
     let (pos, forward, dt) = (plane.pos, plane.forward(), time.delta_secs());
     let locks = &mut *locks;
     update_lock(&mut locks.ir, &IR_LOCK, &candidates, pos, forward, dt);
-    update_lock(&mut locks.radar, &RADAR_LOCK, &candidates, pos, forward, dt);
+    match radar_lock(&aircraft.combat) {
+        Some(spec) => update_lock(&mut locks.radar, &spec, &candidates, pos, forward, dt),
+        None => locks.radar = Lock::default(),
+    }
 }
 
 /// Advance one lock by `dt`, seen from `pos` looking along `forward`, over
@@ -823,10 +839,11 @@ fn fire_control(
     locks: Res<Locks>,
     mut loadout: ResMut<Loadout>,
     mut out: ResMut<NetOut>,
-    plane: Single<&FlightState, With<LocalPlane>>,
+    plane: Single<(&FlightState, &Aircraft), With<LocalPlane>>,
     remotes: RemoteTargets,
     mut gun_cooldown: Local<f32>,
 ) {
+    let (plane, aircraft) = *plane;
     for (key, choice) in [
         (KeyCode::Digit1, WeaponSlot::Gun),
         (KeyCode::Digit2, WeaponSlot::IrMissile),
@@ -843,9 +860,9 @@ fn fire_control(
 
     // Gun: hitscan straight down the nose.
     *gun_cooldown += time.delta_secs();
-    if keys.pressed(KeyCode::Space) && *gun_cooldown >= 1.0 / GUN_RATE {
-        *gun_cooldown = 0.0;
-        out.events.extend(fire_gun(&plane, &remotes, me));
+    if keys.pressed(KeyCode::Space) && gun_ready(&mut gun_cooldown, &aircraft.combat) {
+        out.events
+            .extend(fire_gun(plane, &aircraft.combat, &remotes, me));
     }
 
     // Missile: the selected kind, on a solid lock, with one left.
@@ -858,7 +875,7 @@ fn fire_control(
             &mut commands,
             &assets,
             &mut out,
-            &plane,
+            plane,
             me,
             kind,
             target.to_string(),
@@ -866,14 +883,29 @@ fn fire_control(
     }
 }
 
+/// Whether the gun of an aircraft with `combat` can fire again, `cooldown`
+/// seconds after its last shot; resets the cooldown if so.
+fn gun_ready(cooldown: &mut f32, combat: &Combat) -> bool {
+    let ready = combat.gun_rate > 0.0 && *cooldown >= 1.0 / combat.gun_rate;
+    if ready {
+        *cooldown = 0.0;
+    }
+    ready
+}
+
 /// One gun shot down `plane`'s nose: the damage claim, if it hits.
-fn fire_gun(plane: &FlightState, remotes: &RemoteTargets, me: &str) -> Option<GameEvent> {
+fn fire_gun(
+    plane: &FlightState,
+    combat: &Combat,
+    remotes: &RemoteTargets,
+    me: &str,
+) -> Option<GameEvent> {
     let forward = plane.forward();
     let origin = plane.pos + forward * MUZZLE_OFFSET;
     gun_ray_hit(&origin, &forward, remotes, me).map(|victim| GameEvent::Damage {
         shooter: me.to_string(),
         victim,
-        amount: GUN_DAMAGE,
+        amount: combat.gun_damage,
         cause: DamageCause::Gun,
     })
 }
@@ -1417,10 +1449,10 @@ fn respawn(
     *aim = MouseAim::new(state.quat);
     **pose = SimPose::new(state.pos, state.quat);
     velocity.0 = state.vel;
-    **health = Health::full();
+    **health = Health::full(&aircraft.combat);
     **transform = Transform::from_translation(state.pos).with_rotation(state.quat);
     **visibility = Visibility::Visible;
-    loadout.restock();
+    loadout.restock(&aircraft.combat);
     loadout.respawn_in = None;
     *countermeasures = Countermeasures::default();
     *locks = Locks::default();
@@ -1470,7 +1502,7 @@ fn auto_dogfight(
     assets: Res<WeaponAssets>,
     net: Res<NetState>,
     mode: Res<NetworkMode>,
-    plane: Single<&FlightState, With<LocalPlane>>,
+    plane: Single<(&FlightState, &Aircraft), With<LocalPlane>>,
     remotes: RemoteTargets,
     mut aim: ResMut<MouseAim>,
     mut input: ResMut<FlightInput>,
@@ -1485,7 +1517,7 @@ fn auto_dogfight(
         return;
     }
     let me = net.my_peer();
-    let state = *plane;
+    let (state, aircraft) = *plane;
 
     // Nearest living enemy, with its latest reported velocity for lead
     // pursuit.
@@ -1531,9 +1563,9 @@ fn auto_dogfight(
     }
 
     *gun_cooldown += time.delta_secs();
-    if *gun_cooldown >= 1.0 / GUN_RATE {
-        *gun_cooldown = 0.0;
-        out.events.extend(fire_gun(state, &remotes, me));
+    if gun_ready(&mut gun_cooldown, &aircraft.combat) {
+        out.events
+            .extend(fire_gun(state, &aircraft.combat, &remotes, me));
     }
 
     // Prefer the IR lock, fall back to radar.
@@ -1942,7 +1974,7 @@ mod tests {
         world.spawn((
             LocalPlane,
             FlightState::new(Vec3::ZERO, Quat::IDENTITY, 150.0, 1.0),
-            Health::full(),
+            Health::full(&aces_protocol::aircraft::STANDARD_COMBAT),
             Visibility::default(),
         ));
 

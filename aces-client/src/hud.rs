@@ -9,8 +9,8 @@
 //!   sideslip — watch it open up in hard pulls and stalls.
 //! - **Flight info** (top left): the aircraft, speed, altitude, throttle
 //!   (with the airframe's boost: AB or WEP), load factor,
-//!   angle of attack, the limiter state, the flight recorder and a stall
-//!   warning.
+//!   angle of attack, the limiter state, the gear while not stowed, the
+//!   flight recorder and a stall warning.
 //! - **Weapons** (top right): health, the selected weapon, missiles and
 //!   countermeasures left, both locks.
 //! - **Threat line** (top center): the RWR — inbound missiles and radar
@@ -434,14 +434,14 @@ fn update_markers(
 }
 
 fn update_info(
-    plane: Single<(&FlightState, &Aircraft), With<LocalPlane>>,
+    plane: Single<(&FlightState, &Aircraft, &crate::flight::rig::Gear), With<LocalPlane>>,
     input: Res<FlightInput>,
     #[cfg(not(target_arch = "wasm32"))] recorder: Res<crate::flight::recorder::FlightRecorder>,
     mut info: Single<&mut Text, With<FlightInfo>>,
     mut stall: Single<&mut Visibility, With<StallWarning>>,
     mut buffer: Local<String>,
 ) {
-    let (s, aircraft) = *plane;
+    let (s, aircraft, gear) = *plane;
     buffer.clear();
     let _ = write!(
         buffer,
@@ -468,6 +468,13 @@ fn update_info(
     );
     if input.limiter_off {
         buffer.push_str("\nLIMITER OFF");
+    }
+    if gear.progress < 1.0 {
+        buffer.push_str(match (gear.down, gear.progress <= 0.0) {
+            (_, true) => "\nGEAR DOWN",
+            (true, false) => "\nGEAR EXTENDING",
+            (false, false) => "\nGEAR RETRACTING",
+        });
     }
     #[cfg(not(target_arch = "wasm32"))]
     if recorder.path().is_some() {

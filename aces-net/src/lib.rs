@@ -627,6 +627,8 @@ mod tests {
             vel: [0.0, 0.0, -150.0],
             surfaces: [12, -127, 64],
             hp: 87,
+            gear: 255,
+            throttle: 105,
         });
         let launched = NetMsg::Game(GameEvent::MissileLaunched {
             shooter: "peer-a".into(),

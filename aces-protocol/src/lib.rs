@@ -16,7 +16,7 @@ pub const TICK_HZ: f64 = 60.0;
 pub const SNAPSHOT_HZ: f32 = 20.0;
 
 pub mod aircraft;
-pub use aircraft::{AIRCRAFT, AIRCRAFT_COUNT, AircraftType, Airframe, Engine, aircraft};
+pub use aircraft::{AIRCRAFT, AIRCRAFT_COUNT, AircraftType, Airframe, Combat, Engine, aircraft};
 
 // ── Lobby ───────────────────────────────────────────────────────────────────
 
@@ -49,6 +49,22 @@ pub struct PlaneSnapshot {
     pub surfaces: [i8; 3],
     /// The sender's health, quantized from 0..=100 to a byte. 0 while dead.
     pub hp: u8,
+    /// Landing-gear retraction progress, 0 = down … 255 = up
+    /// ([`quantize_unit`]), so remote gear animates too.
+    pub gear: u8,
+    /// Throttle in percent (past 100 into the boost range), for the remote
+    /// engines' exhaust.
+    pub throttle: u8,
+}
+
+/// Pack a value in [0, 1] into a byte.
+pub fn quantize_unit(value: f32) -> u8 {
+    (value.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+/// Unpack a byte from [`quantize_unit`].
+pub fn dequantize_unit(value: u8) -> f32 {
+    value as f32 / 255.0
 }
 
 /// Pack a control-surface position in [-1, 1] into a byte.

@@ -19,9 +19,13 @@ use aces_net::{
     CH_RELIABLE, CH_UNRELIABLE, Ephemeral, GameEvent, GameStart, MatchboxSocket, NetMsg, NetState,
     PeerId, PeerState, broadcast_reliable, broadcast_unreliable, decode,
 };
-use aces_protocol::{PlaneSnapshot, SNAPSHOT_HZ, dequantize_surface, quantize_surface};
+use aces_protocol::{
+    PlaneSnapshot, SNAPSHOT_HZ, dequantize_surface, dequantize_unit, quantize_surface,
+    quantize_unit,
+};
 use std::collections::VecDeque;
 
+use crate::flight::rig::{Engine, Gear};
 use crate::flight::{LocalPlane, RemotePlane, SimPose, Surfaces, Velocity};
 use crate::{NetworkMode, Phase};
 
@@ -385,12 +389,23 @@ fn watch_start(net: Res<NetState>, state: Res<State<Phase>>, mut next: ResMut<Ne
 
 /// Broadcast this peer's plane state at [`SNAPSHOT_HZ`], from the simulated
 /// pose (not the render-interpolated one).
+#[allow(clippy::type_complexity)]
 fn send_snapshots(
     time: Res<Time>,
     mut pulse: ResMut<SnapshotPulse>,
     socket: Option<ResMut<MatchboxSocket>>,
     net: Res<NetState>,
-    plane: Single<(&SimPose, &Velocity, &Surfaces, &crate::weapons::Health), With<LocalPlane>>,
+    plane: Single<
+        (
+            &SimPose,
+            &Velocity,
+            &Surfaces,
+            &crate::weapons::Health,
+            &Gear,
+            &Engine,
+        ),
+        With<LocalPlane>,
+    >,
 ) {
     pulse.acc += time.delta_secs();
     if pulse.acc < 1.0 / SNAPSHOT_HZ {
@@ -417,6 +432,8 @@ fn send_snapshots(
             vel: plane.1.0.to_array(),
             surfaces: plane.2.to_array().map(quantize_surface),
             hp: plane.3.hp_byte(),
+            gear: quantize_unit(plane.4.progress),
+            throttle: (plane.5.throttle * 100.0).round().clamp(0.0, 255.0) as u8,
         }),
     );
 }
@@ -458,10 +475,12 @@ fn interpolate_remotes(
         &mut Transform,
         &mut Surfaces,
         &mut crate::weapons::Health,
+        &mut Gear,
+        &mut Engine,
     )>,
 ) {
     let now = time.elapsed_secs_f64();
-    for (remote, mut transform, mut surfaces, mut health) in &mut remotes {
+    for (remote, mut transform, mut surfaces, mut health, mut gear, mut engine) in &mut remotes {
         if let Some(sample) = interp_pose(&remote.history, now) {
             transform.translation = sample.pos;
             transform.rotation = sample.rot;
@@ -471,6 +490,13 @@ fn interpolate_remotes(
             health.set_if_neq(crate::weapons::Health {
                 hp: sample.hp,
                 dead: sample.hp <= 0.0,
+            });
+            gear.set_if_neq(Gear {
+                down: sample.gear < 0.5,
+                progress: sample.gear,
+            });
+            engine.set_if_neq(Engine {
+                throttle: sample.throttle,
             });
         }
     }
@@ -484,6 +510,10 @@ pub struct RemoteSample {
     pub surfaces: Surfaces,
     /// The sender's reported health (0 while dead).
     pub hp: f32,
+    /// Gear retraction progress (0 = down, 1 = up).
+    pub gear: f32,
+    /// Throttle (1 = full dry power).
+    pub throttle: f32,
 }
 
 impl RemoteSample {
@@ -493,6 +523,8 @@ impl RemoteSample {
             rot: Quat::from_array(s.rot).normalize(),
             surfaces: Surfaces::from_array(s.surfaces.map(dequantize_surface)),
             hp: s.hp as f32,
+            gear: dequantize_unit(s.gear),
+            throttle: s.throttle as f32 / 100.0,
         }
     }
 
@@ -507,6 +539,8 @@ impl RemoteSample {
             // Health is discrete state, not a pose: take the nearest side's
             // value so a death is never interpolated away.
             hp: if f < 0.5 { self.hp } else { other.hp },
+            gear: self.gear + (other.gear - self.gear) * f,
+            throttle: self.throttle + (other.throttle - self.throttle) * f,
         }
     }
 }
@@ -571,6 +605,8 @@ mod tests {
                 vel,
                 surfaces: [0, 64, -127],
                 hp: 100,
+                gear: 255,
+                throttle: 100,
             },
         )
     }
@@ -597,7 +633,9 @@ mod tests {
                 },
                 Transform::default(),
                 Surfaces::default(),
-                Health::full(),
+                Health::full(&aces_protocol::aircraft::STANDARD_COMBAT),
+                Gear::default(),
+                Engine::default(),
             ))
             .id();
         world.run_system_once(interpolate_remotes).unwrap();
