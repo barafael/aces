@@ -31,7 +31,7 @@ pub enum NetworkMode {
     Net,
 }
 
-/// The room this instance was launched for (CLI arg / `?room=` parameter),
+/// The room this instance was launched for (CLI arg / `#room=` fragment),
 /// enabling the hands-free auto host/join/start flow.
 #[derive(Resource, Default, Debug, Clone)]
 pub struct AutoRoom(pub Option<String>);

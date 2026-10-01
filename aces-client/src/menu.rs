@@ -5,7 +5,7 @@
 //! (`Esc` leaves). Joining asks for a room id with a minimal text field.
 //!
 //! For hands-free two-instance testing, launching with a room id as the CLI
-//! argument (wasm: `?room=`) enables the auto flow: hosting/joining uses
+//! argument (wasm: `#room=`) enables the auto flow: hosting/joining uses
 //! that room, and the host starts once every connected peer has greeted and
 //! the roster holds at least two players.
 

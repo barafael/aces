@@ -296,7 +296,7 @@ camera) · `weapons` (gun, missiles, lock, countermeasures, damage) · `net`
   wing drop) instead of rate commands: "planes don't fly on rails".
 - Snapshots carry the three surface positions (quantized to i8) so remote
   airframes animate too.
-- Launching with a room id as the CLI arg / `?room=` parameter skips the
+- Launching with a room id as the CLI arg / `#room=` fragment skips the
   menu, joins that room, and the elected host auto-starts once the roster
   has ≥ 2 players and every peer has greeted — hands-free two-instance
   testing (normal launches keep the F/H/J menu flow).
@@ -328,7 +328,7 @@ camera) · `weapons` (gun, missiles, lock, countermeasures, damage) · `net`
   nearer the center does not steal it.
 - Kills are counted by every peer, the victim included, from the canonical
   `Killed` stream; the scoreboard lists the whole roster.
-- Native + browser (wasm via trunk, share links with `?room=`).
+- Native + browser (wasm via trunk, share links with `#room=`).
 - Semi-realistic flight model; cone-based arcade radar/IR.
 - 3-crate workspace like gnils; bevy 0.19 to match gnils.
 - Respawn deathmatch (no rounds); lobby-start-only (no mid-game join for v1);
