@@ -1,6 +1,6 @@
 # aces — Flight Combat Simulator
 
-An Ace Combat–inspired 3D flight combat game. Rust + Bevy 0.19, peer-to-peer
+An Ace Combat–inspired 3D flight combat game. Rust + Bevy 0.20, peer-to-peer
 multiplayer for as many players as join, playable natively and in the browser.
 
 ## Architecture
