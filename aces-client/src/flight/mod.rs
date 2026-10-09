@@ -518,7 +518,7 @@ fn show_model(
     models: &mut Query<(&AirframeModel, &mut Visibility)>,
 ) {
     let mut iter = models.iter_many_mut(children);
-    while let Some((model, mut visibility)) = iter.fetch_next() {
+    while let Some(Ok((model, mut visibility))) = iter.fetch_next() {
         visibility.set_if_neq(if model.0 == shown {
             Visibility::Inherited
         } else {
@@ -712,7 +712,7 @@ fn animate_control_surfaces(
 ) {
     for (s, children) in &planes {
         let mut iter = hinges.iter_many_mut(children);
-        while let Some((surface, mut transform)) = iter.fetch_next() {
+        while let Some(Ok((surface, mut transform))) = iter.fetch_next() {
             let (axis, angle) = match surface {
                 ControlSurface::Elevator => (Vec3::X, -s.elevator * ELEVATOR_DEFLECT),
                 ControlSurface::Aileron { left: true } => (Vec3::X, s.aileron * AILERON_DEFLECT),

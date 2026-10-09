@@ -88,7 +88,7 @@ pub struct Engine {
 }
 
 /// Every plane (the ones carrying [`Surfaces`]) gets gear and engines.
-fn equip_plane(add: On<Add, Surfaces>, mut commands: Commands) {
+fn equip_plane(add: On<Add<Surfaces>>, mut commands: Commands) {
     commands
         .entity(add.entity)
         .insert((Gear::default(), Engine::default()));
