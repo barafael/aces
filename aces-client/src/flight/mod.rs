@@ -46,7 +46,7 @@ pub fn tuning() -> Vec<(&'static str, f32)> {
 
 use bevy::gltf::GltfAssetLabel;
 use bevy::prelude::*;
-use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
+use bevy::world_serialization::{WorldAsset, WorldAssetRoot, WorldInstanceReady};
 
 use aces_net::NetState;
 use aces_protocol::{PlaneSnapshot, spawn_point};
@@ -69,6 +69,7 @@ impl Plugin for FlightPlugin {
             .init_resource::<FlightInput>()
             .init_resource::<FreeLook>()
             .init_resource::<MouseAim>()
+            .add_observer(model_ready)
             .add_systems(Startup, init_plane_assets)
             .add_systems(OnEnter(crate::Phase::InGame), spawn_planes)
             .add_systems(OnExit(crate::Phase::InGame), despawn_planes)
@@ -297,7 +298,8 @@ pub struct PlaneAssets {
 /// An aircraft's glTF scene, and whether it is ready to show.
 struct PlaneModel {
     scene: Handle<WorldAsset>,
-    /// Loaded, meshes and textures included (see [`settle_models`]).
+    /// Spawned once — asset, meshes and textures included (see
+    /// [`model_ready`]).
     ready: bool,
 }
 
@@ -530,56 +532,67 @@ fn show_model(
 /// Models load in the background. Until an aircraft's model is ready —
 /// meshes and textures included — its planes show the placeholder airframe
 /// instead of flying invisible (in the browser the models take a while);
-/// once it is, they switch to it. A model that failed to load (its `.glb`
-/// is missing, or needs a glTF extension Bevy lacks) is dropped for good.
+/// once it is, they switch to it ([`model_ready`]). A model that failed to
+/// load (its `.glb` is missing, or needs a glTF extension Bevy lacks) is
+/// dropped for good here.
 fn settle_models(
     server: Res<AssetServer>,
     mut assets: ResMut<PlaneAssets>,
-    planes: Query<(&Aircraft, &Children)>,
-    mut models: Query<(&AirframeModel, &mut Visibility)>,
     mut settled: Local<bool>,
 ) {
     if *settled {
         return;
     }
-    let (mut changed, mut pending) = (false, false);
-    for (index, slot) in assets
-        .bypass_change_detection()
-        .scenes
-        .iter_mut()
-        .enumerate()
-    {
+    let mut pending = false;
+    for (index, slot) in assets.scenes.iter_mut().enumerate() {
         let Some(model) = slot.as_mut().filter(|model| !model.ready) else {
             continue;
         };
-        let id = model.scene.id();
-        if server.load_state(id).is_failed() {
+        if server.load_state(model.scene.id()).is_failed() {
             let name = aces_protocol::aircraft(index as u8).name;
             warn!("the {name} model did not load; showing the placeholder airframe");
             *slot = None;
-            changed = true;
-        } else if server.load_state(id).is_loaded()
-            && !server.recursive_dependency_load_state(id).is_loading()
-        {
-            // Loaded — or a texture failed (logged), which shouldn't hide
-            // the whole model.
-            debug!(
-                aircraft = aces_protocol::aircraft(index as u8).name,
-                "model ready"
-            );
-            model.ready = true;
-            changed = true;
         } else {
             pending = true;
         }
     }
-    if changed {
-        assets.set_changed();
-        for (aircraft, children) in &planes {
-            show_model(children, assets.shown(aircraft.index), &mut models);
+    *settled = !pending;
+}
+
+/// An aircraft model's first instance finished spawning — the asset and
+/// everything it references is in, hierarchy and all — so planes of that
+/// aircraft switch to it. Later instances (respawns, other planes) already
+/// spawn with it shown.
+fn model_ready(
+    ready: On<WorldInstanceReady>,
+    models: Query<&AirframeModel>,
+    mut assets: ResMut<PlaneAssets>,
+    planes: Query<(&Aircraft, &Children)>,
+    mut shown: Query<(&AirframeModel, &mut Visibility)>,
+) {
+    let Ok(&AirframeModel(index)) = models.get(ready.entity) else {
+        return;
+    };
+    let Some(model) = assets
+        .scenes
+        .get_mut(usize::from(index))
+        .and_then(|slot| slot.as_mut())
+    else {
+        return;
+    };
+    if model.ready {
+        return;
+    }
+    model.ready = true;
+    debug!(
+        aircraft = aces_protocol::aircraft(index).name,
+        "model ready"
+    );
+    for (aircraft, children) in &planes {
+        if aircraft.index == index {
+            show_model(children, index, &mut shown);
         }
     }
-    *settled = !pending;
 }
 
 /// Every displayed airframe variant (the procedural placeholder with its
@@ -725,14 +738,8 @@ fn animate_control_surfaces(
 }
 
 /// Leave the game: planes are rebuilt from scratch on the next entry.
-fn despawn_planes(
-    mut commands: Commands,
-    locals: Query<Entity, With<LocalPlane>>,
-    remotes: Query<Entity, With<RemotePlane>>,
-) {
-    for entity in locals.iter().chain(remotes.iter()) {
-        commands.entity(entity).despawn();
-    }
+fn despawn_planes(mut commands: Commands) {
+    commands.despawn_all::<Or<(With<LocalPlane>, With<RemotePlane>)>>();
 }
 
 #[cfg(test)]

@@ -10,13 +10,16 @@
 //! - landing gear retracts with the plane's [`Gear`] (`G` toggles it),
 //! - engine nozzles anchor the exhaust ([`Engine`], throttle-driven).
 //!
-//! Parts are found when a model instance spawns (its nodes' `GltfExtras`
-//! appear), tied to the plane and the model variant they belong to, and
-//! posed every frame while that variant is the one shown. Remote planes
-//! pose from their snapshots' surfaces, gear and throttle.
+//! Parts are found when a model instance finishes spawning (its
+//! [`WorldInstanceReady`] fires — hierarchy and dependencies in), tied to
+//! the plane and the model variant they belong to, and posed every frame
+//! while that variant is the one shown. Remote planes pose from their
+//! snapshots' surfaces, gear and throttle.
 
+use bevy::ecs::system::SystemParam;
 use bevy::gltf::GltfExtras;
 use bevy::prelude::*;
+use bevy::world_serialization::WorldInstanceReady;
 use core::f32::consts::FRAC_PI_2;
 use serde::Deserialize;
 
@@ -32,14 +35,14 @@ pub struct RigPlugin;
 impl Plugin for RigPlugin {
     fn build(&self, app: &mut App) {
         app.add_observer(equip_plane)
+            .add_observer(discover_parts)
             .add_systems(Startup, init_exhaust_assets)
             .add_systems(
                 Update,
                 (
                     (gear_lever, raise_gear_on_respawn, local_engine)
                         .run_if(in_state(Phase::InGame)),
-                    discover_parts,
-                    (pose_parts, drive_exhaust).after(discover_parts),
+                    (pose_parts, drive_exhaust),
                 ),
             );
     }
@@ -201,49 +204,64 @@ pub struct Nozzle {
     pub plane: Entity,
 }
 
-/// Tag the nodes of freshly spawned model instances.
-fn discover_parts(
-    mut commands: Commands,
-    new: Query<(Entity, &GltfExtras, &Transform), Added<GltfExtras>>,
-    parents: Query<&ChildOf>,
-    planes: Query<(), With<Surfaces>>,
-    models: Query<(), With<AirframeModel>>,
-    exhaust: Res<ExhaustAssets>,
-) {
-    for (entity, extras, transform) in &new {
-        let Some(spec) = PartSpec::parse(&extras.value) else {
-            continue;
-        };
-        let (mut model, mut plane) = (None, None);
-        for ancestor in parents.iter_ancestors(entity) {
-            if model.is_none() && models.contains(ancestor) {
-                model = Some(ancestor);
-            }
-            if planes.contains(ancestor) {
-                plane = Some(ancestor);
-                break;
-            }
+/// Everything part discovery sees: the model roots, the hierarchy a fresh
+/// instance sits in, its tagged nodes, and the exhaust a nozzle anchors.
+#[derive(SystemParam)]
+struct PartDiscovery<'w, 's> {
+    commands: Commands<'w, 's>,
+    models: Query<'w, 's, (), With<AirframeModel>>,
+    children: Query<'w, 's, &'static Children>,
+    parents: Query<'w, 's, &'static ChildOf>,
+    planes: Query<'w, 's, (), With<Surfaces>>,
+    nodes: Query<'w, 's, (&'static GltfExtras, &'static Transform)>,
+    exhaust: Res<'w, ExhaustAssets>,
+}
+
+impl PartDiscovery<'_, '_> {
+    /// Tag the nodes of a freshly spawned model instance: its variant root
+    /// `model` is ready, so walk the instance for tagged nodes and tie each
+    /// to the plane (an ancestor of the root) and the variant itself.
+    fn discover(&mut self, model: Entity) {
+        if !self.models.contains(model) {
+            return;
         }
-        let (Some(model), Some(plane)) = (model, plane) else {
-            continue;
+        let Some(plane) = self
+            .parents
+            .iter_ancestors(model)
+            .find(|ancestor| self.planes.contains(*ancestor))
+        else {
+            return;
         };
-        if spec.role == "nozzle" {
-            let radius = spec.radius.unwrap_or(0.4);
-            commands
-                .entity(entity)
-                .insert(Nozzle { radius, plane })
-                .with_children(|nozzle| spawn_flames(nozzle, &exhaust));
-            continue;
+        for entity in self.children.iter_descendants::<Children>(model) {
+            let Ok((extras, transform)) = self.nodes.get(entity) else {
+                continue;
+            };
+            let Some(spec) = PartSpec::parse(&extras.value) else {
+                continue;
+            };
+            if spec.role == "nozzle" {
+                let radius = spec.radius.unwrap_or(0.4);
+                self.commands
+                    .entity(entity)
+                    .insert(Nozzle { radius, plane })
+                    .with_children(|nozzle| spawn_flames(nozzle, &self.exhaust));
+                continue;
+            }
+            let axis = Vec3::from(spec.axis).try_normalize().unwrap_or(Vec3::X);
+            self.commands.entity(entity).insert(RigPart {
+                spec,
+                axis,
+                rest: transform.rotation,
+                plane,
+                model,
+            });
         }
-        let axis = Vec3::from(spec.axis).try_normalize().unwrap_or(Vec3::X);
-        commands.entity(entity).insert(RigPart {
-            spec,
-            axis,
-            rest: transform.rotation,
-            plane,
-            model,
-        });
     }
+}
+
+/// Tag the parts of every freshly spawned model instance.
+fn discover_parts(ready: On<WorldInstanceReady>, mut discovery: PartDiscovery) {
+    discovery.discover(ready.entity);
 }
 
 /// Pose every part of every shown model from its plane's commands and gear.
