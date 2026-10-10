@@ -519,8 +519,8 @@ fn show_model(
     shown: u8,
     models: &mut Query<(&AirframeModel, &mut Visibility)>,
 ) {
-    let mut iter = models.iter_many_mut(children);
-    while let Some(Ok((model, mut visibility))) = iter.fetch_next() {
+    let mut iter = models.iter_many_mut(children).matched();
+    while let Some((model, mut visibility)) = iter.fetch_next() {
         visibility.set_if_neq(if model.0 == shown {
             Visibility::Inherited
         } else {
@@ -724,8 +724,8 @@ fn animate_control_surfaces(
     mut hinges: Query<(&ControlSurface, &mut Transform)>,
 ) {
     for (s, children) in &planes {
-        let mut iter = hinges.iter_many_mut(children);
-        while let Some(Ok((surface, mut transform))) = iter.fetch_next() {
+        let mut iter = hinges.iter_many_mut(children).matched();
+        while let Some((surface, mut transform)) = iter.fetch_next() {
             let (axis, angle) = match surface {
                 ControlSurface::Elevator => (Vec3::X, -s.elevator * ELEVATOR_DEFLECT),
                 ControlSurface::Aileron { left: true } => (Vec3::X, s.aileron * AILERON_DEFLECT),
@@ -774,6 +774,29 @@ mod tests {
         assert_eq!(assets.shown(2), 0, "a loading model falls back meanwhile");
         assert_eq!(assets.shown(3), 0, "a missing model falls back");
         assert_eq!(assets.shown(9), 0, "an unknown aircraft falls back");
+    }
+
+    /// The hinges sit after the placeholder's fixed parts among the plane's
+    /// children (see [`spawn_airframe`]); the parts that aren't hinges must
+    /// not stop the hinges from deflecting.
+    #[test]
+    fn hinges_after_other_children_deflect() {
+        let mut app = App::new();
+        app.add_systems(Update, animate_control_surfaces);
+        let fuselage = app.world_mut().spawn(Transform::default()).id();
+        let elevator = app
+            .world_mut()
+            .spawn((ControlSurface::Elevator, Transform::default()))
+            .id();
+        app.world_mut()
+            .spawn(Surfaces {
+                elevator: 1.0,
+                ..default()
+            })
+            .add_children(&[fuselage, elevator]);
+        app.update();
+        let rotation = app.world().get::<Transform>(elevator).unwrap().rotation;
+        assert_ne!(rotation, Quat::IDENTITY, "the elevator deflects");
     }
     use bevy::input::InputPlugin;
     use bevy::input::mouse::MouseMotion;
