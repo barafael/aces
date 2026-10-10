@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 bevy = "0.20"
-matchbox_socket = { git = "https://github.com/barafael/matchbox.git", branch = "main" }
+matchbox_socket = { git = "https://github.com/barafael/matchbox.git", rev = "27b5e50254ee8d113bbbec964185c562c3c2bee8" }
 aces-protocol = { path = "../aces-protocol" }
 postcard = { version = "1.1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }

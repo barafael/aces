@@ -298,8 +298,7 @@ pub struct PlaneAssets {
 /// An aircraft's glTF scene, and whether it is ready to show.
 struct PlaneModel {
     scene: Handle<WorldAsset>,
-    /// Spawned once — asset, meshes and textures included (see
-    /// [`model_ready`]).
+    /// An instance of it has spawned (see [`model_ready`]).
     ready: bool,
 }
 
@@ -529,10 +528,10 @@ fn show_model(
     }
 }
 
-/// Models load in the background. Until an aircraft's model is ready —
-/// meshes and textures included — its planes show the placeholder airframe
-/// instead of flying invisible (in the browser the models take a while);
-/// once it is, they switch to it ([`model_ready`]). A model that failed to
+/// Models load in the background. Until an aircraft's model is ready, its
+/// planes show the placeholder airframe instead of flying invisible (in the
+/// browser the models take a while); once it is, they switch to it
+/// ([`model_ready`]). A model that failed to
 /// load (its `.glb` is missing, or needs a glTF extension Bevy lacks) is
 /// dropped for good here.
 fn settle_models(
@@ -559,10 +558,14 @@ fn settle_models(
     *settled = !pending;
 }
 
-/// An aircraft model's first instance finished spawning — the asset and
-/// everything it references is in, hierarchy and all — so planes of that
-/// aircraft switch to it. Later instances (respawns, other planes) already
-/// spawn with it shown.
+/// An aircraft model's first instance finished spawning, hierarchy and all,
+/// so planes of that aircraft switch to it. Later instances (respawns, other
+/// planes) already spawn with it shown.
+///
+/// The instance spawns as soon as the scene asset itself is loaded; Bevy
+/// doesn't wait for the assets it references. That is enough because every
+/// model is a self-contained `.glb`: its meshes and embedded textures load as
+/// part of the same file.
 fn model_ready(
     ready: On<WorldInstanceReady>,
     models: Query<&AirframeModel>,

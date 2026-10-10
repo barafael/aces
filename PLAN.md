@@ -233,11 +233,11 @@ them — coordinates go straight into a rig script), `rig.py --check`
 (renders neutral / pull / roll / yaw / gear half / gear up), `sheet.py`
 (contact sheets).
 
-### glb export recipe (verified against bevy_gltf 0.19)
+### glb export recipe (verified against bevy_gltf 0.20)
 
 Bevy's first-class format is glTF; `.glb` is ideal for wasm (single
 self-contained file = one HTTP request). **Export from Blender with
-compression OFF**: bevy 0.19 supports neither Draco, nor meshopt, nor
+compression OFF**: bevy 0.20 supports neither Draco, nor meshopt, nor
 `KHR_mesh_quantization`, nor the `KHR_texture_basisu` extension syntax.
 +Y up (Blender default), textures embedded, keep them ≤ 2k for wasm payload.
 
